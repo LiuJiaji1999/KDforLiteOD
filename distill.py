@@ -9,7 +9,7 @@ from ultralytics.models.yolo.detect.distill import DetectionDistiller
 if __name__ == '__main__':
     param_dict = {
         # origin
-        'model': 'ultralytics/cfg/models/v10/yolov10n.yaml', # stu
+        'model': 'ultralytics/cfg/models/v11/yolov8m.yaml', # stu
         'data':'./dataset/data.yaml',
         'imgsz': 640,
         'epochs': 200,
@@ -18,15 +18,15 @@ if __name__ == '__main__':
         'cache': True,
         'optimizer': 'SGD',
         'device': '0',
-        'close_mosaic': 20,
+        'close_mosaic': 0,
         # 'amp': False, # 如果蒸馏损失为nan，请把amp设置为False
         'project':'runs/distill',
-        'name':'yolov8n-chsim-exp1',
+        'name':'yolov8m-chsim-exp1',
         
         # distill
         'prune_model': False,
         'teacher_weights': 'runs/train/exp/weights/best.pt',
-        'teacher_cfg': 'ultralytics/cfg/models/v10/yolov10n.yaml',
+        'teacher_cfg': 'ultralytics/cfg/models/11/yolo11.yaml',
         'kd_loss_type': 'logical',
         'kd_loss_decay': 'constant',
         
