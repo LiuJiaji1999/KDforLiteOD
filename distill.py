@@ -10,7 +10,7 @@ if __name__ == '__main__':
     param_dict = {
         # origin
         'model': 'ultralytics/cfg/models/v11/yolov8m.yaml', # stu
-        'data':'./dataset/data.yaml',
+        'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
         'epochs': 200,
         'batch': 32,
