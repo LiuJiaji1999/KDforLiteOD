@@ -17,12 +17,12 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = 'runs/train/exp/weights/best.pt'
+    model_path = 'runs/train/11exp/weights/best.pt'
     model = YOLO(model_path) # 选择训练好的权重路径
-    result = model.val(data='/root/dataset/dataset_visdrone/data.yaml',
-                        split='val', # split可以选择train、val、test 根据自己的数据集情况来选择.
+    result = model.val(data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
+                        split='test', # split可以选择train、val、test 根据自己的数据集情况来选择.
                         imgsz=640,
-                        batch=16,
+                        batch=1,
                         # iou=0.7,
                         # rect=False,
                         # save_json=True, # if you need to cal coco metrice
@@ -41,11 +41,7 @@ if __name__ == '__main__':
         n_l, n_p, n_g, flops = model_info(model.model)
         
         print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
-        print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
-        print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
-        print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
-        print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
-
+   
         model_info_table = PrettyTable()
         model_info_table.title = "Model Info"
         model_info_table.field_names = ["GFLOPs", "Parameters", "前处理时间/一张图", "推理时间/一张图", "后处理时间/一张图", "FPS(前处理+模型推理+后处理)", "FPS(推理)", "Model File Size"]
@@ -79,13 +75,10 @@ if __name__ == '__main__':
                                 ])
         print(model_metrice_table)
 
-        with open(result.save_dir / 'paper_data.txt', 'w+', errors="ignore", encoding="utf-8") as f:
-            f.write(str(model_info_table))
-            f.write('\n')
-            f.write(str(model_metrice_table))
+        # with open(result.save_dir / 'paper_data.txt', 'w+', errors="ignore", encoding="utf-8") as f:
+        #     f.write(str(model_info_table))
+        #     f.write('\n')
+        #     f.write(str(model_metrice_table))
         
-        print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
-        print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
-        print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
-        print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
-        print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
+        # print('-'*20, f'结果已保存至{result.save_dir}/paper_data.txt...', '-'*20)
+    
