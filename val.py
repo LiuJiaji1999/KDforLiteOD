@@ -17,9 +17,11 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = 'runs/train/11exp/weights/best.pt'
+    model_path = './runs/distill/yolo11m-L1-exp/weights/best.pt'
     model = YOLO(model_path) # 选择训练好的权重路径
-    result = model.val(data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
+    result = model.val(
+                        data='./dataset/powerdata.yaml',
+                        # data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
                         split='test', # split可以选择train、val、test 根据自己的数据集情况来选择.
                         imgsz=640,
                         batch=1,
