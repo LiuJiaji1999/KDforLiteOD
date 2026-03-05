@@ -21,7 +21,7 @@ if __name__ == '__main__':
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
-        'name':'yolo11m-cwd-exp',
+        'name':'yolo11m-chsim-exp',
         
         # distill
         'prune_model': False,
@@ -35,7 +35,7 @@ if __name__ == '__main__':
         
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
-        'feature_loss_type': 'cwd', # 'mimic', 'mgd'-loss=nan, 'cwd', 'chsim', 'sp'
+        'feature_loss_type': 'chsim', # 'mimic', 'mgd'-loss=nan, 'cwd', 'chsim', 'sp'
         'feature_loss_ratio': 1.0
     }
     
