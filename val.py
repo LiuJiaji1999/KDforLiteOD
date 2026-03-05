@@ -17,22 +17,22 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = './runs/distill/yolo11m-BCKD-exp/weights/best.pt'
+    model_path = './runs/distill/yolo11m-mgd-exp/weights/best.pt'
     model = YOLO(model_path) # 选择训练好的权重路径
     result = model.val(
                         data='./dataset/powerdata.yaml',
                         # data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
                         split='test', # split可以选择train、val、test 根据自己的数据集情况来选择.
-                        imgsz=640,
+                        imgsz=800,
                         batch=1,
                         # iou=0.7,
                         # rect=False,
                         # save_json=True, # if you need to cal coco metrice
                         project='runs/val',
-                        name='exp',
+                        name='exp-mgd',
                         )
     
-    if model.task == 'detect': # 仅目标检测任务适用 需要改别的任务可以看：https://www.bilibili.com/video/BV1dBQDY6Ec5/
+    if model.task == 'detect':  
         length = result.box.p.size
         model_names = list(result.names.values())
         preprocess_time_per_image = result.speed['preprocess']
@@ -42,7 +42,7 @@ if __name__ == '__main__':
         
         n_l, n_p, n_g, flops = model_info(model.model)
         
-        print('-'*20 + '论文上的数据以以下结果为准' + '-'*20)
+        print('-'*20 + '以下数据结果为准' + '-'*20)
    
         model_info_table = PrettyTable()
         model_info_table.title = "Model Info"
