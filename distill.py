@@ -21,17 +21,17 @@ if __name__ == '__main__':
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
-        'name':'yolo11m-mgd-exp',
+        'name':'yolo11m-BCKD-exp',
         
         # distill
         'prune_model': False,
         'teacher_weights': 'runs/train/11exp2/weights/best.pt',
         'teacher_cfg': 'ultralytics/cfg/models/11/yolo11m.yaml',
-        'kd_loss_type': 'feature', # 'logical', 'feature', 'all'
+        'kd_loss_type': 'logical', # 'logical', 'feature', 'all'
         'kd_loss_decay': 'constant', # 'cosine', 'linear', 'cosine_epoch', 'linear_epoch', 'constant'
 
         'logical_loss_type': 'BCKD', # 'l1', 'l2', 'BCKD'
-        'logical_loss_ratio': 1.0,
+        'logical_loss_ratio': 0.5,
         
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
