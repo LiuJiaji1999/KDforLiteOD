@@ -1077,6 +1077,7 @@ class AngleWiseRKD(nn.Module):
         return loss
 
 # -------------------------------------------------
+from mmseg.models.utils import resize
 class WSLD(nn.Module):
     """PyTorch version of `Rethinking Soft Labels for Knowledge
     Distillation: A Bias-Variance Tradeoff Perspective
