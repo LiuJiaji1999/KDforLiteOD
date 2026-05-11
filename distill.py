@@ -9,7 +9,7 @@ from ultralytics.models.yolo.detect.distill import DetectionDistiller
 if __name__ == '__main__':
     param_dict = {
         # origin
-        'model': 'ultralytics/cfg/models/11/yolo11m.yaml', # stu
+        'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
         'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
         'epochs': 100,
@@ -27,7 +27,7 @@ if __name__ == '__main__':
         'prune_model': False,
         'teacher_weights': 'runs/train/11exp2/weights/best.pt',
         'teacher_cfg': 'ultralytics/cfg/models/11/yolo11m.yaml',
-        'kd_loss_type': 'logical', # 'logical', 'feature', 'all'
+        'kd_loss_type': 'all', # 'logical', 'feature', 'all'
         'kd_loss_decay': 'constant', # 'cosine', 'linear', 'cosine_epoch', 'linear_epoch', 'constant'
 
         'logical_loss_type': 'BCKD', # 'l1', 'l2', 'BCKD'

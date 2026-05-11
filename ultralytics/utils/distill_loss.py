@@ -572,6 +572,7 @@ class MimicLoss(nn.Module):
         return loss
 
 # ------------------------------------------------------------
+    # Masked Generative Distillation
 class MGDLoss(nn.Module):
     def __init__(self,
                  channels_s,
@@ -623,6 +624,134 @@ class MGDLoss(nn.Module):
         dis_loss = loss_mse(new_fea, preds_T) / N
 
         return dis_loss
+    
+#-------------------------------------------
+# Bias-variance decomposition knowledge distillation for medical image segmentation
+class BENINLoss(nn.Module):
+    def __init__(self,
+                 channels_s,
+                 channels_t,
+                 alpha_mgd=0.00002,
+                 lambda_mgd=0.75,
+                 a=1):
+        super(BENINLoss, self).__init__()
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.alpha_mgd = alpha_mgd
+        self.lambda_mgd = lambda_mgd
+        self.a = a
+        self.log_sm = torch.nn.LogSoftmax(dim=1)
+        self.sm = torch.nn.Softmax(dim=1)
+
+        if channels_s != channels_t:
+            self.align = nn.Conv2d(channels_s, channels_t, kernel_size=1, stride=1, padding=0)
+        else:
+            self.align = None
+
+
+        self.generation = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channel, channel, kernel_size=3,
+                          padding=1)).to(device) for channel in channels_t
+        ])
+
+    def forward(self, y_s, y_t):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        assert len(y_s) == len(y_t)
+        losses = []
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape
+            losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
+        loss = sum(losses)
+        return loss
+
+    def get_dis_loss(self, preds_S, preds_T, idx):
+        kl_distance = nn.KLDivLoss(reduction='none')
+        N, C, H, W = preds_T.shape
+
+        device = preds_S.device
+        mat = torch.rand((N, 1, H, W)).to(device)
+        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device)
+
+        masked_fea = torch.mul(preds_S, mat)
+        new_fea = self.generation[idx](masked_fea)
+
+        loss = kl_distance(self.log_sm(new_fea), self.sm(preds_T))
+        variance = kl_distance(self.log_sm(new_fea), self.sm(preds_S))
+
+        exp_variance = torch.exp(-variance)
+        dis_loss1 = torch.mean(self.a * loss + (1-self.a) * loss * exp_variance) + torch.mean(variance)
+        dis_loss = dis_loss1/N
+
+        return dis_loss
+
+#-------------------------------------------
+    # BENIN 中的 损失
+class UncerLoss(nn.Module):
+    def __init__(self,
+                 channels_s,
+                 channels_t,
+                 alpha_mgd=0.00002,
+                 a=1):
+        super(UncerLoss, self).__init__()
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.alpha_mgd = alpha_mgd
+        self.a = a
+        self.log_sm = torch.nn.LogSoftmax(dim=1)
+        self.sm = torch.nn.Softmax(dim=1)
+        self.maxpool = nn.MaxPool2d(8)
+
+        self.align = nn.Conv2d(channels_s, channels_t, kernel_size=1, stride=1, padding=0)
+
+        self.generation = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channel, channel, kernel_size=3,
+                          padding=1)).to(device) for channel in channels_t
+        ])
+
+    def forward(self, y_s, y_t,inputs = None):
+        assert len(y_s) == len(y_t)
+        losses = []
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape
+            bias = torch.mean(self.get_bias_loss(y_s, y_t))
+            var = torch.mean(self.get_var_loss(inputs, y_s))
+            # loss = bias / (2 * var) + var
+            exp_variance = torch.exp(-var)
+            losses.append(bias * exp_variance + var)
+        loss = sum(losses)
+        return loss
+
+    def get_bias_loss(self, preds_S, preds_T, idx):
+        kl_distance = nn.KLDivLoss(reduction='none')
+        preds_S = self.align(preds_S)
+        new_fea = self.generation[idx](preds_S)
+        bias_loss = kl_distance(self.log_sm(new_fea), self.sm(preds_T))
+        return bias_loss
+    
+    def get_var_loss(self, preds_S, inputs, idx):
+        kl_distance = nn.KLDivLoss(reduction='none')
+        inputs = inputs[0]
+        
+        new_fea = self.generation[idx](preds_S)
+        new_fea = self.align(new_fea)
+        inputs = self.maxpool(inputs)
+
+        var_loss = kl_distance(self.log_sm(inputs), self.sm(new_fea))
+
+        return var_loss
+
 
 # ------------------------------------------------------------
 class CWDLoss(nn.Module):
@@ -726,4 +855,287 @@ class SPKDLoss(nn.Module):
             sp_loss = sp_loss.sum() / s.size(0)
             losses.append(sp_loss)
         loss = sum(losses)
+        return loss
+    
+# ----------------------------------------------------------
+
+# Dist+: Knowledge distillation from a stronger adaptive teacher
+def cosine_similarity(a, b, eps=1e-8):
+    return (a * b).sum(1) / (a.norm(dim=1) * b.norm(dim=1) + eps)
+
+def pearson_correlation(a, b, eps=1e-8):
+    return cosine_similarity(a - a.mean(1).unsqueeze(1),
+                             b - b.mean(1).unsqueeze(1), eps)
+
+def inter_class_relation(y_s, y_t):
+    return 1 - pearson_correlation(y_s, y_t).mean()
+
+def intra_class_relation(y_s, y_t):
+    return inter_class_relation(y_s.transpose(0, 1), y_t.transpose(0, 1))
+
+class DIST(nn.Module):
+    def __init__(self, beta=1.0, gamma=1.0, tau=1.0):
+        super(DIST, self).__init__()
+        self.beta = beta
+        self.gamma = gamma
+        self.tau = tau
+
+    def forward(self, z_s, z_t):
+        y_s = (z_s / self.tau).softmax(dim=1)
+        y_t = (z_t / self.tau).softmax(dim=1)
+
+        inter_loss = self.tau**2 * inter_class_relation(y_s, y_t)
+        intra_loss = self.tau**2 * intra_class_relation(y_s, y_t)
+
+        kd_loss = self.beta * inter_loss + self.gamma * intra_loss
+        return kd_loss
+
+#Fusion KD
+def norm(feat: torch.Tensor) -> torch.Tensor:
+    """Normalize the feature maps to have zero mean and unit variances.
+
+    Args:
+        feat (torch.Tensor): The original feature map with shape
+            (N, C, H, W).
+    """
+    assert len(feat.shape) == 4
+    N, C, H, W = feat.shape
+    feat = feat.permute(1, 0, 2, 3).reshape(C, -1)
+    mean = feat.mean(dim=-1, keepdim=True)
+    std = feat.std(dim=-1, keepdim=True)
+    feat = (feat - mean) / (std + 1e-6)
+    return feat.reshape(C, N, H, W).permute(1, 0, 2, 3)
+
+
+@weighted_loss
+def pkd_loss(pred, target):
+    pred = norm(pred)
+    target = norm(target)
+    # return F.cosine_similarity(pred, target)/2
+    return F.mse_loss(pred, target, reduction='none') / 2
+
+
+class PKDLoss(nn.Module):
+
+    def __init__(self, reduction='mean', loss_weight=1.0):
+        super(PKDLoss, self).__init__()
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+
+    def forward(self,
+                pred,
+                target,
+                weight=None,
+                avg_factor=None,
+                reduction_override=None) -> torch.Tensor:
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+        reduction = (
+            reduction_override if reduction_override else self.reduction)
+        loss = self.loss_weight * pkd_loss(
+            pred, target, weight, reduction=reduction, avg_factor=avg_factor)
+        return loss
+    
+# ----------------------------
+# RelationalKD
+def euclidean_distance(pred, squared=False, eps=1e-12):
+    """Calculate the Euclidean distance between the two examples in the output
+    representation space.
+
+    Args:
+        pred (torch.Tensor): The prediction of the teacher or student with
+            shape (N, C).
+        squared (bool): Whether to calculate the squared Euclidean
+            distance. Defaults to False.
+        eps (float): The minimum Euclidean distance between the two
+            examples. Defaults to 1e-12.
+    """
+    pred_square = pred.pow(2).sum(dim=-1)  # (N, )
+    prod = torch.mm(pred, pred.t())  # (N, N)
+    distance = (pred_square.unsqueeze(1) + pred_square.unsqueeze(0) -
+                2 * prod).clamp(min=eps)  # (N, N)
+
+    if not squared:
+        distance = distance.sqrt()
+
+    distance = distance.clone()
+    distance[range(len(prod)), range(len(prod))] = 0
+    return distance
+
+
+def angle(pred):
+    """Calculate the angle-wise relational potential which measures the angle
+    formed by the three examples in the output representation space.
+
+    Args:
+        pred (torch.Tensor): The prediction of the teacher or student with
+            shape (N, C).
+    """
+    pred_vec = pred.unsqueeze(0) - pred.unsqueeze(1)  # (N, N, C)
+    norm_pred_vec = F.normalize(pred_vec, p=2, dim=2)
+    angle = torch.bmm(norm_pred_vec,
+                      norm_pred_vec.transpose(1, 2)).view(-1)  # (N*N*N, )
+    return angle
+
+class DistanceWiseRKD(nn.Module):
+    """PyTorch version of distance-wise loss of `Relational Knowledge
+    Distillation.
+
+    <https://arxiv.org/abs/1904.05068>`_.
+
+    Args:
+        loss_weight (float): Weight of distance-wise distillation loss.
+            Defaults to 25.0.
+        with_l2_norm (bool): Whether to normalize the model predictions before
+            calculating the loss. Defaults to True.
+    """
+
+    def __init__(self, loss_weight=25.0, with_l2_norm=True):
+        super(DistanceWiseRKD, self).__init__()
+
+        self.loss_weight = loss_weight
+        self.with_l2_norm = with_l2_norm
+
+    def distance_loss(self, preds_S, preds_T):
+        """Calculate distance-wise distillation loss."""
+        d_T = euclidean_distance(preds_T, squared=False)
+        # mean_d_T is a normalization factor for distance
+        mean_d_T = d_T[d_T > 0].mean()
+        d_T = d_T / mean_d_T
+
+        d_S = euclidean_distance(preds_S, squared=False)
+        mean_d_S = d_S[d_S > 0].mean()
+        d_S = d_S / mean_d_S
+
+        return F.smooth_l1_loss(d_S, d_T)
+
+    def forward(self, preds_S, preds_T):
+        """Forward computation.
+
+        Args:
+            preds_S (torch.Tensor): The student model prediction with
+                shape (N, C, H, W) or shape (N, C).
+            preds_T (torch.Tensor): The teacher model prediction with
+                shape (N, C, H, W) or shape (N, C).
+        Return:
+            torch.Tensor: The calculated loss value.
+        """
+        preds_S = preds_S.view(preds_S.shape[0], -1)
+        preds_T = preds_T.view(preds_T.shape[0], -1)
+        if self.with_l2_norm:
+            preds_S = F.normalize(preds_S, p=2, dim=1)
+            preds_T = F.normalize(preds_T, p=2, dim=1)
+
+        loss = self.distance_loss(preds_S, preds_T) * self.loss_weight
+
+        return loss
+
+
+class AngleWiseRKD(nn.Module):
+    """PyTorch version of angle-wise loss of `Relational Knowledge
+    Distillation.
+
+    <https://arxiv.org/abs/1904.05068>`_.
+
+    Args:
+        loss_weight (float): Weight of angle-wise distillation loss.
+            Defaults to 50.0.
+        with_l2_norm (bool): Whether to normalize the model predictions before
+            calculating the loss. Defaults to True.
+    """
+
+    def __init__(self, loss_weight=50.0, with_l2_norm=True):
+        super(AngleWiseRKD, self).__init__()
+
+        self.loss_weight = loss_weight
+        self.with_l2_norm = with_l2_norm
+
+    def angle_loss(self, preds_S, preds_T):
+        """Calculate the angle-wise distillation loss."""
+        angle_T = angle(preds_T)
+        angle_S = angle(preds_S)
+        return F.smooth_l1_loss(angle_S, angle_T)
+
+    def forward(self, preds_S, preds_T):
+        """Forward computation.
+
+        Args:
+            preds_S (torch.Tensor): The student model prediction with
+                shape (N, C, H, W) or shape (N, C).
+            preds_T (torch.Tensor): The teacher model prediction with
+                shape (N, C, H, W) or shape (N, C).
+        Return:
+            torch.Tensor: The calculated loss value.
+        """
+        preds_S = preds_S.view(preds_S.shape[0], -1)
+        preds_T = preds_T.view(preds_T.shape[0], -1)
+        if self.with_l2_norm:
+            preds_S = F.normalize(preds_S, p=2, dim=-1)
+            preds_T = F.normalize(preds_T, p=2, dim=-1)
+
+        loss = self.angle_loss(preds_S, preds_T) * self.loss_weight
+
+        return loss
+
+# -------------------------------------------------
+class WSLD(nn.Module):
+    """PyTorch version of `Rethinking Soft Labels for Knowledge
+    Distillation: A Bias-Variance Tradeoff Perspective
+    <https://arxiv.org/abs/2102.00650>`_.
+
+    Args:
+        tau (float): Temperature coefficient. Defaults to 1.0.
+        loss_weight (float): Weight of loss. Defaults to 1.0.
+        num_classes (int): Defaults to 1000.
+    """
+
+    def __init__(self, tau=1.0, loss_weight=1.0, num_classes=1000):
+        super(WSLD, self).__init__()
+
+        self.tau = tau
+        self.loss_weight = loss_weight
+        self.num_classes = num_classes
+        self.softmax = nn.Softmax(dim=1)
+        self.logsoftmax = nn.LogSoftmax(dim=1)
+
+    def forward(self, student, teacher, gt_labels):
+
+        student = resize(
+                input=student,
+                size=gt_labels.shape[1:],
+                mode='bilinear',
+                align_corners=False)
+
+        teacher = resize(
+            input=teacher,
+            size=gt_labels.shape[1:],
+            mode='bilinear',
+            align_corners=False)
+
+        student_logits = student / self.tau
+        teacher_logits = teacher / self.tau
+
+        teacher_probs = self.softmax(teacher_logits)
+
+        ce_loss = -torch.sum(
+            teacher_probs * self.logsoftmax(student_logits), 1, keepdim=True)
+
+        student_detach = student.detach()
+        teacher_detach = teacher.detach()
+        log_softmax_s = self.logsoftmax(student_detach)
+        log_softmax_t = self.logsoftmax(teacher_detach)
+        one_hot_labels = F.one_hot(
+            gt_labels, num_classes=self.num_classes).float().permute(0, 3, 1, 2)
+        ce_loss_s = -torch.sum(one_hot_labels * log_softmax_s, 1, keepdim=True)
+        ce_loss_t = -torch.sum(one_hot_labels * log_softmax_t, 1, keepdim=True)
+
+        focal_weight = ce_loss_s / (ce_loss_t + 1e-7)
+        ratio_lower = torch.zeros_like(focal_weight)
+        focal_weight = torch.max(focal_weight, ratio_lower)
+        focal_weight = 1 - torch.exp(-focal_weight)
+        ce_loss = focal_weight * ce_loss
+
+        loss = (self.tau**2) * torch.mean(ce_loss)
+
+        loss = self.loss_weight * loss
+
         return loss
