@@ -528,6 +528,24 @@ class FeatureLoss(nn.Module):
             self.feature_loss = ChSimLoss(channels_s, channels_t)
         elif (distiller == 'sp'):
             self.feature_loss = SPKDLoss(channels_s, channels_t)
+        elif (distiller == 'benin'):
+            self.feature_loss = BENINLoss(channels_s, channels_t)
+        elif (distiller == 'uncertainty'):
+            self.feature_loss = UncerLoss(channels_s, channels_t)
+        elif (distiller == 'dist'):
+            self.feature_loss = DIST(channels_s, channels_t)
+        elif (distiller == 'pkd'):
+            self.feature_loss = PKDLoss(channels_s, channels_t)
+        elif (distiller == 'distrkd'):
+            self.feature_loss = DistanceWiseRKD(channels_s, channels_t)
+        elif (distiller == 'anglerkd'):
+            self.feature_loss = AngleWiseRKD(channels_s, channels_t)
+        elif (distiller == 'wsld'):
+            self.feature_loss = WSLD(channels_s, channels_t)
+        elif (distiller == 'diffkd'):
+            print('using ./diffkd/DiffKD')
+            # self.feature_loss = DiffKD(channels_s, channels_t)
+        
         else:
             raise NotImplementedError
 
@@ -1077,10 +1095,10 @@ class AngleWiseRKD(nn.Module):
         return loss
 
 # -------------------------------------------------
-from mmseg.models.utils import resize
+# from mmseg.models.utils import resize
+    # Weighted-Soft-Label-Distillation
 class WSLD(nn.Module):
-    """PyTorch version of `Rethinking Soft Labels for Knowledge
-    Distillation: A Bias-Variance Tradeoff Perspective
+    """PyTorch version of `Rethinking Soft Labels for Knowledge Distillation: A Bias-Variance Tradeoff Perspective
     <https://arxiv.org/abs/2102.00650>`_.
 
     Args:
@@ -1100,17 +1118,17 @@ class WSLD(nn.Module):
 
     def forward(self, student, teacher, gt_labels):
 
-        student = resize(
-                input=student,
-                size=gt_labels.shape[1:],
-                mode='bilinear',
-                align_corners=False)
+        # student = resize(
+        #         input=student,
+        #         size=gt_labels.shape[1:],
+        #         mode='bilinear',
+        #         align_corners=False)
 
-        teacher = resize(
-            input=teacher,
-            size=gt_labels.shape[1:],
-            mode='bilinear',
-            align_corners=False)
+        # teacher = resize(
+        #     input=teacher,
+        #     size=gt_labels.shape[1:],
+        #     mode='bilinear',
+        #     align_corners=False)
 
         student_logits = student / self.tau
         teacher_logits = teacher / self.tau

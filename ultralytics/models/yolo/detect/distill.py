@@ -557,7 +557,28 @@ class DetectionDistiller(BaseTrainer):
                     distill_decay = eta_min + (base_ratio - eta_min) * (1 + math.cos(math.pi * ni / T_max)) / 2
                 elif self.args.kd_loss_decay == 'linear_epoch':
                     distill_decay = ((1 - math.cos(ni * math.pi / (self.epochs * nb))) / 2) * (0.01 - 1) + 1
-                
+                ## adapta  KD/FusionKD/mmdet/models/detectors/fusionkd_atss.py
+                elif self.args.kd_loss_decay == 'adaptive':
+                    progress = epoch / self.epochs
+                    # 自适应衰减策略
+                    if epoch < 10:
+                        # 前期：强蒸馏，快速学习教师知识
+                        distill_decay = 1.0 - progress * 0.2
+                    elif epoch < 20:
+                        # 中期：平衡蒸馏，防止过拟合
+                        distill_decay = 0.8 - (progress - 0.33) * 0.4
+                    else:
+                        # 后期：弱蒸馏，主要优化检测任务
+                        distill_decay = max(0.2, 0.4 - (progress - 0.66) * 0.5)
+                elif self.args.kd_loss_decay == 'performance_aware':
+                    # 性能感知衰减
+                    if len(self.performance_history) > 3:
+                        recent_improvement = self.performance_history[-1] - self.performance_history[-3]
+                        if recent_improvement < 0.01:  # 性能提升缓慢
+                            distill_decay = max(0.2, distill_decay * 0.8)
+                        else:
+                            distill_decay = min(1.0, distill_decay * 1.1)
+
                 # Forward
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
