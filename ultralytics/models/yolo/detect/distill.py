@@ -16,6 +16,8 @@ from datetime import datetime
 from copy import copy, deepcopy
 from pathlib import Path
 
+import torch.nn.functional as F
+
 import numpy as np
 
 from ultralytics.cfg import get_cfg, get_save_dir
@@ -32,6 +34,313 @@ from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.torch_utils import ModelEMA, EarlyStopping, one_cycle, init_seeds, select_device
 from ultralytics.utils.distill_loss import LogicalLoss, FeatureLoss
 from ultralytics.nn.extra_modules.kernel_warehouse import get_temperature
+
+class AdaptiveReviewKD(nn.Module):
+    """
+    Adaptive Knowledge Selection + Historical Teacher Prototype Review.
+
+    实现：
+    1. 层级类别级适配度 A_l,c
+    2. 当前 batch 的教师/学生类别原型 P_T,l,c 和 P_S,l,c
+    3. 历史教师原型池 M_l,c
+    4. 复习损失 L_review
+    """
+
+    def __init__(
+        self,
+        nc,
+        eta_t=0.6,
+        eta_s=0.4,
+        tau_g=1.0,
+        theta_h=0.5,
+        momentum=0.999,
+        eps=1e-6,
+        use_q_fallback=True,
+    ):
+        super().__init__()
+        self.nc = int(nc)
+        self.eta_t = eta_t
+        self.eta_s = eta_s
+        self.tau_g = tau_g
+        self.theta_h = theta_h
+        self.momentum = momentum
+        self.eps = eps
+        self.use_q_fallback = use_q_fallback
+
+        self.projectors = nn.ModuleList()
+        self.built = False
+
+    def build_once(self, s_feats, t_feats):
+        """
+        根据第一次 forward 得到的师生特征通道数构建 1x1 conv 映射：
+        F_S <- conv1x1(F_S)
+
+        注意：如果你希望 1x1 conv 被 optimizer 更新，需要在 build 后把参数加入 optimizer。
+        后面我会给出接入代码。
+        """
+        if self.built:
+            return False
+
+        device = s_feats[0].device
+        for i, (sf, tf) in enumerate(zip(s_feats, t_feats)):
+            cs = sf.shape[1]
+            ct = tf.shape[1]
+            if cs == ct:
+                projector = nn.Identity()
+            else:
+                projector = nn.Conv2d(cs, ct, kernel_size=1, stride=1, padding=0, bias=False)
+            projector = projector.to(device)
+            self.projectors.append(projector)
+            self.register_buffer(f"memory_{i}", torch.zeros(self.nc, ct, device=device))
+            self.register_buffer(f"valid_{i}", torch.zeros(self.nc, dtype=torch.bool, device=device))
+        self.built = True
+        return True
+
+    def _memory(self, layer_idx):
+        return getattr(self, f"memory_{layer_idx}")
+
+    def _valid(self, layer_idx):
+        return getattr(self, f"valid_{layer_idx}")
+
+    @staticmethod
+    def _spatial_norm(x, eps=1e-6):
+        """
+        Norm(F) = (F - mean) / std
+        mean/std 在空间维度 H,W 上计算。
+        """
+        mean = x.mean(dim=(-2, -1), keepdim=True)
+        std = x.std(dim=(-2, -1), keepdim=True).clamp_min(eps)
+        return (x - mean) / std
+
+    def _make_fg_masks(self, batch, feats):
+        """
+        根据 GT 框构建 Ω_l,c^fg。
+
+        这里默认 Ultralytics 格式：
+        batch['bboxes']: normalized xywh, shape [N, 4]
+        batch['cls']: shape [N, 1] or [N]
+        batch['batch_idx']: shape [N]
+        """
+        b = feats[0].shape[0]
+        device = feats[0].device
+
+        masks = []
+        for feat in feats:
+            _, _, h, w = feat.shape
+            masks.append(torch.zeros(b, self.nc, h, w, device=device, dtype=torch.bool))
+
+        if batch["bboxes"].numel() == 0:
+            return masks
+
+        batch_idx = batch["batch_idx"].long().view(-1)
+        cls = batch["cls"].long().view(-1)
+        boxes = batch["bboxes"]
+
+        for bi, ci, box in zip(batch_idx, cls, boxes):
+            ci = int(ci.item())
+            if ci < 0 or ci >= self.nc:
+                continue
+            # normalized xywh
+            cx, cy, bw, bh = box
+            for li, feat in enumerate(feats):
+                _, _, h, w = feat.shape
+                x1 = ((cx - bw / 2) * w).floor().long().clamp(0, w - 1)
+                y1 = ((cy - bh / 2) * h).floor().long().clamp(0, h - 1)
+                x2 = ((cx + bw / 2) * w).ceil().long().clamp(0, w - 1)
+                y2 = ((cy + bh / 2) * h).ceil().long().clamp(0, h - 1)
+                if x2 < x1 or y2 < y1:
+                    continue
+                masks[li][bi, ci, y1:y2 + 1, x1:x2 + 1] = True
+        return masks
+
+    def _extract_teacher_cls_maps(self, t_pred, t_feats):
+        """
+        尝试从 teacher raw pred 中提取每个检测层的类别概率图。
+
+        对 YOLO 类模型，一般 raw pred 可能是 list[Tensor]，
+        Tensor shape 可能是 [B, no, H, W]，其中最后 nc 个通道通常是分类 logits。
+
+        如果你的 teacher 输出结构不同，可以只改这个函数。
+        """
+        if isinstance(t_pred, dict):
+            # 对 one2one / one2many 结构，优先用 one2many
+            t_pred = t_pred.get("one2many", t_pred.get("one2one", t_pred))
+
+        if not isinstance(t_pred, (list, tuple)):
+            return None
+
+        candidates = []
+        for x in t_pred:
+            if torch.is_tensor(x) and x.ndim == 4 and x.shape[1] >= self.nc:
+                candidates.append(x)
+
+        if len(candidates) == 0:
+            return None
+
+        cls_maps = []
+        for i, feat in enumerate(t_feats):
+            raw = candidates[min(i, len(candidates) - 1)]
+            cls_logits = raw[:, -self.nc:, :, :]
+            prob = cls_logits.sigmoid()
+
+            if prob.shape[-2:] != feat.shape[-2:]:
+                prob = F.interpolate(
+                    prob,
+                    size=feat.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+            cls_maps.append(prob.detach())
+
+        return cls_maps
+
+    def _calc_reliability_uncertainty(self, cls_map, mask, c):
+        """
+        R_l,c 和 U_l,c。
+
+        R_l,c：前景区域类别 c 的平均教师置信度。
+        U_l,c：前景区域 teacher 分类分布熵，归一化到 [0, 1]。
+        """
+        if cls_map is None or mask.sum() == 0:
+            device = mask.device
+            return torch.tensor(1.0, device=device), torch.tensor(0.0, device=device)
+
+        p_c = cls_map[:, c, :, :][mask].clamp(self.eps, 1.0)
+        r_lc = p_c.mean()
+
+        all_p = cls_map.permute(0, 2, 3, 1)[mask].clamp(self.eps, 1.0)
+        all_p = all_p / all_p.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        entropy = -(all_p * all_p.log()).sum(dim=-1)
+        entropy = entropy / math.log(max(self.nc, 2))
+        u_lc = entropy.mean().clamp(0.0, 1.0)
+
+        return r_lc, u_lc
+
+    def forward(self, s_feats, t_feats, batch, t_pred=None, epoch=0, epochs=1):
+        """
+        Return:
+            proto_feature_loss:
+                适配性感知的类别原型特征蒸馏损失，对应论文中的 A_l,c * φ(F_T, F_S)。
+                这里用 prototype MSE 作为轻量实现。
+
+            review_loss:
+                历史教师原型复习损失，已经乘上 λ_re。
+
+            adapt_mean:
+                当前 batch 的平均 A_l,c，可用于重新加权原有 CWD/MGD/KL feature loss。
+        """
+        self.build_once(s_feats, t_feats)
+
+        s_feats = [proj(sf) for proj, sf in zip(self.projectors, s_feats)]
+        t_feats = [tf.detach() for tf in t_feats]
+
+        fg_masks = self._make_fg_masks(batch, t_feats)
+        cls_maps = self._extract_teacher_cls_maps(t_pred, t_feats)
+
+        proto_feature_loss = s_feats[0].new_zeros(())
+        review_loss = s_feats[0].new_zeros(())
+        adapt_values = []
+        valid_pairs = 0
+
+        lambda_re = math.sin(math.pi * float(epoch + 1) / max(float(epochs), 1.0))
+
+        for li, (sf, tf, mask_l) in enumerate(zip(s_feats, t_feats, fg_masks)):
+            sf_norm = self._spatial_norm(sf, self.eps)
+            tf_norm = self._spatial_norm(tf, self.eps)
+
+            memory = self._memory(li)
+            valid = self._valid(li)
+
+            cls_map = None if cls_maps is None else cls_maps[li]
+
+            for c in range(self.nc):
+                mask = mask_l[:, c, :, :]
+
+                if mask.sum() == 0:
+                    continue
+
+                # [num_fg, C]
+                sf_points = sf.permute(0, 2, 3, 1)[mask]
+                tf_points = tf.permute(0, 2, 3, 1)[mask]
+
+                if sf_points.numel() == 0 or tf_points.numel() == 0:
+                    continue
+
+                # P_S,l,c and P_T,l,c
+                ps = sf_points.mean(dim=0)
+                pt = tf_points.mean(dim=0)
+
+                # Sim_l,c
+                sim_lc = 0.5 * (
+                    1.0 + F.cosine_similarity(ps.unsqueeze(0), pt.unsqueeze(0), dim=1).squeeze(0)
+                )
+                sim_lc = sim_lc.clamp(0.0, 1.0)
+
+                # D_l,c and G_l,c
+                sf_norm_points = sf_norm.permute(0, 2, 3, 1)[mask]
+                tf_norm_points = tf_norm.permute(0, 2, 3, 1)[mask]
+
+                d_lc = torch.abs(sf_norm_points - tf_norm_points).mean()
+                g_lc = torch.exp(-d_lc / self.tau_g).clamp(0.0, 1.0)
+
+                # R_l,c and U_l,c
+                r_lc, u_lc = self._calc_reliability_uncertainty(cls_map, mask, c)
+
+                # Q_l,c
+                # 如果你已有 teacher box decode，可以在这里替换成 IoU(b_T, b_gt)。
+                # 当前版本没有侵入 YOLO 解码器，因此默认用 R_l,c 作为定位质量近似项。
+                q_lc = r_lc if self.use_q_fallback else torch.tensor(1.0, device=sf.device)
+
+                # A_l,c = 0.24R + 0.24Q + 0.20Sim + 0.20G + 0.12(1-U)
+                a_lc = (
+                    0.24 * r_lc
+                    + 0.24 * q_lc
+                    + 0.20 * sim_lc
+                    + 0.20 * g_lc
+                    + 0.12 * (1.0 - u_lc)
+                ).clamp(0.0, 1.0)
+
+                # 通常建议 detach，避免学生通过改变 A_l,c 来“逃避”蒸馏约束
+                a_detach = a_lc.detach()
+                adapt_values.append(a_detach)
+
+                # 适配性感知当前特征原型蒸馏，对应 L_feature 的层级类别级实现
+                proto_feature_loss = proto_feature_loss + a_detach * F.mse_loss(ps, pt)
+
+                # 历史教师原型复习损失
+                if valid[c]:
+                    old_pt = memory[c].detach()
+                    review_consistency = 0.5 * (
+                        1.0 + F.cosine_similarity(pt.unsqueeze(0), old_pt.unsqueeze(0), dim=1).squeeze(0)
+                    )
+                    review_consistency = review_consistency.clamp(0.0, 1.0).detach()
+
+                    review_loss = review_loss + a_detach * review_consistency * F.mse_loss(ps, old_pt)
+
+                # 更新历史教师原型池 M_l,c
+                with torch.no_grad():
+                    if a_detach > self.theta_h:
+                        if valid[c]:
+                            memory[c].mul_(self.momentum).add_(pt.detach(), alpha=1.0 - self.momentum)
+                        else:
+                            memory[c].copy_(pt.detach())
+                            valid[c] = True
+
+                valid_pairs += 1
+
+        if valid_pairs > 0:
+            proto_feature_loss = proto_feature_loss / valid_pairs
+            review_loss = review_loss / valid_pairs
+            adapt_mean = torch.stack(adapt_values).mean()
+        else:
+            adapt_mean = s_feats[0].new_tensor(1.0)
+
+        review_loss = review_loss * lambda_re
+
+        return proto_feature_loss, review_loss, adapt_mean
+
 
 def get_activation(feat, backbone_idx=-1):
     def hook(model, inputs, outputs):
@@ -461,6 +770,31 @@ class DetectionDistiller(BaseTrainer):
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
+        
+        ## add
+        # Adaptive Knowledge Selection + Prototype Review KD
+        self.use_adaptive_review_kd = getattr(self.args, 'use_adaptive_review_kd', False)
+
+        if self.use_adaptive_review_kd:
+            nc = getattr(de_parallel(self.model), 'nc', None)
+            if nc is None:
+                nc = getattr(self, 'data', {}).get('nc', None)
+            if nc is None:
+                nc = len(getattr(self, 'names', []))
+
+            self.adaptive_review_kd = AdaptiveReviewKD(
+                nc=nc,
+                eta_t=getattr(self.args, 'aks_eta_t', 0.6),
+                eta_s=getattr(self.args, 'aks_eta_s', 0.4),
+                tau_g=getattr(self.args, 'aks_tau_g', 1.0),
+                theta_h=getattr(self.args, 'review_theta_h', 0.5),
+                momentum=getattr(self.args, 'review_momentum', 0.999),
+            ).to(self.device)
+        else:
+            self.adaptive_review_kd = None
+
+
+
 
         self.epoch_time = None
         self.epoch_time_start = time.time()
@@ -527,6 +861,9 @@ class DetectionDistiller(BaseTrainer):
             self.tloss = None
             self.logical_disloss = torch.zeros(1, device=self.device)
             self.feature_disloss = torch.zeros(1, device=self.device)
+            ##add
+            self.review_disloss = torch.zeros(1, device=self.device)
+
             self.optimizer.zero_grad()
             for i, batch in pbar:
                 self.run_callbacks('on_train_batch_start')
@@ -591,16 +928,80 @@ class DetectionDistiller(BaseTrainer):
                     main_loss, self.loss_items = de_parallel(self.model).criterion(pred, batch)
                     
                     log_distill_loss, fea_distill_loss = torch.zeros(1, device=self.device), torch.zeros(1, device=self.device)
+                    
                     if self.kd_logical_loss is not None:
                         if type(pred) is dict and type(t_pred) is dict:
                             log_distill_loss = self.kd_logical_loss(pred['one2one'], t_pred['one2one'], batch, True) * self.args.logical_loss_ratio
                             log_distill_loss += self.kd_logical_loss(pred['one2many'], t_pred['one2many'], batch) * self.args.logical_loss_ratio * 0.5
                         else:
                             log_distill_loss = self.kd_logical_loss(pred, t_pred, batch) * self.args.logical_loss_ratio
+                    # if self.kd_feature_loss is not None:
+                    #     fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
+                    ##add
+                    review_loss = torch.zeros(1, device=self.device)
                     if self.kd_feature_loss is not None:
-                        fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
+                        s_kd_feats = [s_feature[i] for i in s_feature_idx]
+                        t_kd_feats = [t_feature[i] for i in t_feature_idx]
+
+                        # 原始公开可复现特征蒸馏损失，例如 CWD / MGD / KL
+                        base_fea_distill_loss = self.kd_feature_loss(s_kd_feats, t_kd_feats)
+
+                        if self.adaptive_review_kd is not None:
+                            # 第一次使用时构建 conv1x1 projector。
+                            # 如果 projector 是 Conv2d，需要加入 optimizer，否则不会更新。
+                            was_built = self.adaptive_review_kd.built
+
+                            proto_fea_loss, review_loss, adapt_weight = self.adaptive_review_kd(
+                                s_kd_feats,
+                                t_kd_feats,
+                                batch=batch,
+                                t_pred=t_pred,
+                                epoch=epoch,
+                                epochs=self.epochs,
+                            )
+
+                            if not was_built:
+                                new_params = []
+                                for p in self.adaptive_review_kd.projectors.parameters():
+                                    if p.requires_grad:
+                                        new_params.append(p)
+
+                                if len(new_params):
+                                    self.optimizer.add_param_group({
+                                        'params': new_params,
+                                        'lr': self.optimizer.param_groups[0]['lr'],
+                                        'initial_lr': self.optimizer.param_groups[0].get(
+                                            'initial_lr',
+                                            self.optimizer.param_groups[0]['lr']
+                                        ),
+                                        'momentum': self.optimizer.param_groups[0].get('momentum', self.args.momentum),
+                                        'weight_decay': self.optimizer.param_groups[0].get('weight_decay', 0.0),
+                                    })
+
+                            # 组合方式：
+                            # 1. base_fea_distill_loss * adapt_weight：对原 CWD/MGD/KL 做整体适配性重加权
+                            # 2. proto_fea_loss：显式层级类别级 A_l,c 原型蒸馏
+                            fea_distill_loss = (
+                                base_fea_distill_loss * adapt_weight + proto_fea_loss
+                            ) * self.args.feature_loss_ratio
+
+                        else:
+                            fea_distill_loss = base_fea_distill_loss * self.args.feature_loss_ratio
+
                     
-                    self.loss = main_loss + (log_distill_loss + fea_distill_loss) * batch['img'].size(0) * distill_decay
+                    # self.loss = main_loss + (
+                    #     log_distill_loss + fea_distill_loss
+                    #  ) * batch['img'].size(0) * distill_decay
+                    
+                    review_loss_ratio = getattr(self.args, 'review_loss_ratio', 0.5)
+
+                    self.loss = main_loss + (
+                        log_distill_loss
+                        + fea_distill_loss
+                        # + review_loss * review_loss_ratio
+                    ) * batch['img'].size(0) * distill_decay
+
+
                     if RANK != -1:
                         self.loss *= world_size
                     self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
@@ -609,6 +1010,11 @@ class DetectionDistiller(BaseTrainer):
                         else log_distill_loss
                     self.feature_disloss = (self.feature_disloss * i + fea_distill_loss) / (i + 1) if self.feature_disloss is not None \
                         else fea_distill_loss
+                    ##add,滑动统计
+                    # self.review_disloss = (self.review_disloss * i + review_loss) / (i + 1) if self.review_disloss is not None \
+                        # else review_loss
+
+                    
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -624,10 +1030,21 @@ class DetectionDistiller(BaseTrainer):
                 losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
                 logical_dislosses = self.logical_disloss if loss_len > 1 else torch.unsqueeze(self.logical_disloss, 0)
                 feature_dislosses = self.feature_disloss if loss_len > 1 else torch.unsqueeze(self.feature_disloss, 0)
+                # ##add pbar显示
+                # review_dislosses = self.review_disloss if loss_len > 1 else torch.unsqueeze(self.review_disloss, 0)
+
+
                 if RANK in (-1, 0):
                     pbar.set_description(
                         ('%11s' * 2 + '%11.4g' * (2 + loss_len + 2)) %
-                        (f'{epoch + 1}/{self.epochs}', mem, *losses, *logical_dislosses, *feature_dislosses, batch['cls'].shape[0], batch['img'].shape[-1]))
+                        (f'{epoch + 1}/{self.epochs}',
+                          mem, 
+                          *losses,
+                          *logical_dislosses, 
+                          *feature_dislosses,
+                        #   *review_dislosses,
+                            batch['cls'].shape[0], 
+                            batch['img'].shape[-1]))
                     self.run_callbacks('on_batch_end')
                     if self.args.plots and ni in self.plot_idx:
                         self.plot_training_samples(batch, ni)

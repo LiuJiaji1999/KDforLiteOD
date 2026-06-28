@@ -142,3 +142,14 @@ teacher_kd_layers: 15,18,21
 student_kd_layers: 15,18,21
 feature_loss_type: cwd # 'mimic', 'mgd', 'cwd', 'chsim', 'sp'
 feature_loss_ratio: 1.0
+
+##add
+use_adaptive_review_kd: True
+
+aks_eta_t: 0.6
+aks_eta_s: 0.4
+aks_tau_g: 1.0
+
+review_theta_h: 0.5
+review_momentum: 0.999
+review_loss_ratio: 0.5
