@@ -528,6 +528,7 @@ class FeatureLoss(nn.Module):
             self.feature_loss = ChSimLoss(channels_s, channels_t)
         elif (distiller == 'sp'):
             self.feature_loss = SPKDLoss(channels_s, channels_t)
+        
         elif (distiller == 'benin'):
             self.feature_loss = BENINLoss(channels_s, channels_t)
         elif (distiller == 'uncertainty'):
