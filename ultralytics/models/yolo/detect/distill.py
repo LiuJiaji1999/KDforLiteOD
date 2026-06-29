@@ -1400,7 +1400,7 @@ class DetectionDistiller(BaseTrainer):
                     #     log_distill_loss + fea_distill_loss
                     #  ) * batch['img'].size(0) * distill_decay
                     
-                    review_loss_ratio = getattr(self.args, "review_loss_ratio", 0.5)
+                    # review_loss_ratio = getattr(self.args, "review_loss_ratio", 0.5)
                     
                     # L = L_det + L_logical + L_feature + λ_review * L_review
                     # L_feature = A_l,c 加权后的原 feature KD + A_l,c 加权的类别原型 KD
@@ -1408,7 +1408,7 @@ class DetectionDistiller(BaseTrainer):
                     self.loss = main_loss + (
                         log_distill_loss
                         + fea_distill_loss
-                        + review_loss * review_loss_ratio
+                        + review_loss     # * review_loss_ratio
                     ) * batch["img"].size(0) * distill_decay
 
 
@@ -1447,7 +1447,7 @@ class DetectionDistiller(BaseTrainer):
 
                 if RANK in (-1, 0):
                     pbar.set_description(
-                        ('%11s' * 2 + '%11.4g' * (2 + loss_len + 2)) %
+                        ('%11s' * 2 + '%11.4g' * (4 + loss_len + 2)) %
                         (f'{epoch + 1}/{self.epochs}',
                           mem, 
                           *losses,

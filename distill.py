@@ -9,7 +9,7 @@ from ultralytics.models.yolo.detect.distill import DetectionDistiller
 if __name__ == '__main__':
     param_dict = {
         # origin
-        'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
+        'model': 'ultralytics/cfg/models/11/yolo11m.yaml', # stu
         'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
         'epochs': 100,
@@ -20,8 +20,9 @@ if __name__ == '__main__':
         'device': '0',
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
-        'project':'runs/distill',
-        'name':'yolo11m-MGD-exp',
+        # 'project':'runs/distill',
+        'project':'runs/debug',
+        'name':'yolo11m-mimic-exp',
         
         # distill
         'prune_model': False,
@@ -35,8 +36,8 @@ if __name__ == '__main__':
         
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
-        'feature_loss_type': 'mgd', # 'mimic', 'mgd'-loss=nan, 'cwd', 'chsim', 'sp'
-        'feature_loss_ratio': 0.1
+        'feature_loss_type': 'mimic', # 'mimic', 'mgd'-loss=nan, 'cwd', 'chsim', 'sp'
+        'feature_loss_ratio': 0.5
     }
     
     model = DetectionDistiller(overrides=param_dict)
