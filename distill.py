@@ -20,9 +20,9 @@ if __name__ == '__main__':
         'device': '0',
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
-        # 'project':'runs/distill',
-        'project':'runs/debug',
-        'name':'yolo11m-mimic-exp',
+        'project':'runs/distill',
+        # 'project':'runs/debug',
+        'name':'yolo11m-mimic-aks-exp',
         
         # distill
         'prune_model': False,

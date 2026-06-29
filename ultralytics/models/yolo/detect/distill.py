@@ -864,9 +864,14 @@ class DetectionDistiller(BaseTrainer):
             return keys
 
     def progress_string(self):
-        """Returns a formatted string of training progress with epoch, GPU memory, loss, instances and size."""
-        return ('\n' + '%11s' *
-                (4 + len(self.loss_names) + 2)) % ('Epoch', 'GPU_mem', *self.loss_names, 'log_loss', 'fea_loss', 'Instances', 'Size')
+        """Returns a formatted string of training progress with epoch, GPU memory, loss, KD losses, instances and size."""
+        return ('\n' + '%11s' * 
+                (6 + len(self.loss_names) + 2)) % ('Epoch','GPU_mem', *self.loss_names,
+                                                    'log_loss','fea_loss',
+                                                    'pro_loss','rev_loss',
+                                                    'Instances','Size'
+        )
+
 
     def plot_training_samples(self, batch, ni):
         """Plots training samples with their annotations."""
