@@ -149,7 +149,7 @@ feature_loss_ratio: 1.0
 # use_adaptive_kd=True  use_aks=False use_review=True use_proto_feature_kd=False review_use_adapt_gate=False review_update_with_aks=False # # 只加历史复习
 # use_adaptive_kd=True  use_aks=True use_review=True use_proto_feature_kd=True review_use_adapt_gate=True review_update_with_aks=True # 完整
 
-use_adaptive_kd: True          # 总开关：是否启用本文方法模块
+use_adaptive_kd: True          # 是否启用本文方法模块
 # ------------------------------
 # Module-level ablation
 # ------------------------------

@@ -207,10 +207,8 @@ class AdaptiveReviewKD(nn.Module):
     def compute_adaptation_score(self, r_lc, q_lc, sim_lc, g_lc, u_lc):
         """
         Compute A_l,c.
-
         Full:
             A_l,c = 0.24R + 0.24Q + 0.20Sim + 0.20G + 0.12(1-U)
-
         Ablation:
             通过 aks_use_xxx 控制是否启用某个组成项。
         """
