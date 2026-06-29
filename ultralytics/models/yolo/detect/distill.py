@@ -39,60 +39,159 @@ class AdaptiveReviewKD(nn.Module):
     """
     Adaptive Knowledge Selection + Historical Teacher Prototype Review.
 
-    实现：
-    1. 层级类别级适配度 A_l,c
-    2. 当前 batch 的教师/学生类别原型 P_T,l,c 和 P_S,l,c
-    3. 历史教师原型池 M_l,c
-    4. 复习损失 L_review
+    支持：
+    1. 模块间消融：
+        - use_aks
+        - use_review
+        - use_proto_feature_kd
+
+    2. AKS 模块内消融：
+        - aks_use_r
+        - aks_use_q
+        - aks_use_sim
+        - aks_use_g
+        - aks_use_u
+
+    3. Review 模块内消融：
+        - review_use_adapt_gate
+        - review_use_consistency
+        - review_update_with_aks
+        - review_theta_h
+        - review_momentum
+        - review_lambda_schedule
     """
 
     def __init__(
         self,
         nc,
-        eta_t=0.6,
-        eta_s=0.4,
-        tau_g=1.0,
-        theta_h=0.5,
-        momentum=0.999,
-        eps=1e-6,
+
+        # ------------------------------
+        # Module-level ablation
+        # ------------------------------
+        use_aks=True,
+        use_review=True,
+        use_proto_feature_kd=True,
+
+        # ------------------------------
+        # AKS component ablation
+        # ------------------------------
+        aks_use_r=True,
+        aks_use_q=True,
+        aks_use_sim=True,
+        aks_use_g=True,
+        aks_use_u=True,
+
+        aks_w_r=0.24,
+        aks_w_q=0.24,
+        aks_w_sim=0.20,
+        aks_w_g=0.20,
+        aks_w_u=0.12,
+
+        aks_tau_g=1.0,
+        aks_detach=True,
+        aks_renorm_weights=True,
+
+        # 当前代码中如果没有 teacher box decode，则 Q_l,c 用 R_l,c 近似
         use_q_fallback=True,
+
+        # ------------------------------
+        # Review ablation
+        # ------------------------------
+        review_use_adapt_gate=True,
+        review_use_consistency=True,
+        review_update_with_aks=True,
+        review_theta_h=0.5,
+        review_momentum=0.999,
+        review_lambda_schedule="sine",
+
+        eps=1e-6,
     ):
         super().__init__()
+
         self.nc = int(nc)
-        self.eta_t = eta_t
-        self.eta_s = eta_s
-        self.tau_g = tau_g
-        self.theta_h = theta_h
-        self.momentum = momentum
-        self.eps = eps
+
+        # module-level switches
+        self.use_aks = use_aks
+        self.use_review = use_review
+        self.use_proto_feature_kd = use_proto_feature_kd
+
+        # AKS component switches
+        self.aks_use_r = aks_use_r
+        self.aks_use_q = aks_use_q
+        self.aks_use_sim = aks_use_sim
+        self.aks_use_g = aks_use_g
+        self.aks_use_u = aks_use_u
+
+        # AKS weights
+        self.aks_w_r = aks_w_r
+        self.aks_w_q = aks_w_q
+        self.aks_w_sim = aks_w_sim
+        self.aks_w_g = aks_w_g
+        self.aks_w_u = aks_w_u
+
+        self.aks_tau_g = aks_tau_g
+        self.aks_detach = aks_detach
+        self.aks_renorm_weights = aks_renorm_weights
         self.use_q_fallback = use_q_fallback
+
+        # Review switches
+        self.review_use_adapt_gate = review_use_adapt_gate
+        self.review_use_consistency = review_use_consistency
+        self.review_update_with_aks = review_update_with_aks
+        self.review_theta_h = review_theta_h
+        self.review_momentum = review_momentum
+        self.review_lambda_schedule = review_lambda_schedule
+
+        self.eps = eps
 
         self.projectors = nn.ModuleList()
         self.built = False
 
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
     def build_once(self, s_feats, t_feats):
         """
         根据第一次 forward 得到的师生特征通道数构建 1x1 conv 映射：
-        F_S <- conv1x1(F_S)
+            F_S <- conv1x1(F_S)
 
-        注意：如果你希望 1x1 conv 被 optimizer 更新，需要在 build 后把参数加入 optimizer。
-        后面我会给出接入代码。
+        注意：
+            如果 student / teacher 通道数不同，则会创建 Conv2d。
+            该 Conv2d 参数需要在训练循环里加入 optimizer。
         """
         if self.built:
             return False
 
         device = s_feats[0].device
+
         for i, (sf, tf) in enumerate(zip(s_feats, t_feats)):
             cs = sf.shape[1]
             ct = tf.shape[1]
+
             if cs == ct:
                 projector = nn.Identity()
             else:
-                projector = nn.Conv2d(cs, ct, kernel_size=1, stride=1, padding=0, bias=False)
+                projector = nn.Conv2d(
+                    cs,
+                    ct,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    bias=False,
+                )
+
             projector = projector.to(device)
             self.projectors.append(projector)
-            self.register_buffer(f"memory_{i}", torch.zeros(self.nc, ct, device=device))
-            self.register_buffer(f"valid_{i}", torch.zeros(self.nc, dtype=torch.bool, device=device))
+
+            self.register_buffer(
+                f"memory_{i}",
+                torch.zeros(self.nc, ct, device=device),
+            )
+            self.register_buffer(
+                f"valid_{i}",
+                torch.zeros(self.nc, dtype=torch.bool, device=device),
+            )
+
         self.built = True
         return True
 
@@ -102,6 +201,97 @@ class AdaptiveReviewKD(nn.Module):
     def _valid(self, layer_idx):
         return getattr(self, f"valid_{layer_idx}")
 
+    # ------------------------------------------------------------------
+    # AKS
+    # ------------------------------------------------------------------
+    def compute_adaptation_score(self, r_lc, q_lc, sim_lc, g_lc, u_lc):
+        """
+        Compute A_l,c.
+
+        Full:
+            A_l,c = 0.24R + 0.24Q + 0.20Sim + 0.20G + 0.12(1-U)
+
+        Ablation:
+            通过 aks_use_xxx 控制是否启用某个组成项。
+        """
+
+        if not self.use_aks:
+            return torch.ones_like(r_lc)
+
+        terms = []
+        weights = []
+
+        if self.aks_use_r:
+            terms.append(r_lc)
+            weights.append(self.aks_w_r)
+
+        if self.aks_use_q:
+            terms.append(q_lc)
+            weights.append(self.aks_w_q)
+
+        if self.aks_use_sim:
+            terms.append(sim_lc)
+            weights.append(self.aks_w_sim)
+
+        if self.aks_use_g:
+            terms.append(g_lc)
+            weights.append(self.aks_w_g)
+
+        if self.aks_use_u:
+            terms.append(1.0 - u_lc)
+            weights.append(self.aks_w_u)
+
+        if len(terms) == 0:
+            return torch.ones_like(r_lc)
+
+        score = torch.zeros_like(r_lc)
+
+        for t, w in zip(terms, weights):
+            score = score + w * t
+
+        if self.aks_renorm_weights:
+            weight_sum = max(sum(weights), self.eps)
+            score = score / weight_sum
+
+        score = score.clamp(0.0, 1.0)
+
+        if self.aks_detach:
+            score = score.detach()
+
+        return score
+
+    def get_review_lambda(self, epoch, epochs):
+        """
+        Review loss weight schedule.
+
+        sine:
+            lambda_re = sin(pi * e / E)
+        """
+
+        e = float(epoch + 1)
+        E = max(float(epochs), 1.0)
+
+        if self.review_lambda_schedule == "sine":
+            return math.sin(math.pi * e / E)
+
+        elif self.review_lambda_schedule == "constant":
+            return 1.0
+
+        elif self.review_lambda_schedule == "linear":
+            return e / E
+
+        elif self.review_lambda_schedule == "cosine":
+            return 0.5 * (1.0 - math.cos(math.pi * e / E))
+
+        elif self.review_lambda_schedule == "none":
+            return 1.0
+
+        else:
+            return math.sin(math.pi * e / E)
+
+    # ------------------------------------------------------------------
+    # Feature / mask utilities
+    # ------------------------------------------------------------------
     @staticmethod
     def _spatial_norm(x, eps=1e-6):
         """
@@ -116,20 +306,30 @@ class AdaptiveReviewKD(nn.Module):
         """
         根据 GT 框构建 Ω_l,c^fg。
 
-        这里默认 Ultralytics 格式：
-        batch['bboxes']: normalized xywh, shape [N, 4]
-        batch['cls']: shape [N, 1] or [N]
-        batch['batch_idx']: shape [N]
+        默认 Ultralytics 格式：
+            batch['bboxes']: normalized xywh, shape [N, 4]
+            batch['cls']: shape [N, 1] or [N]
+            batch['batch_idx']: shape [N]
         """
+
         b = feats[0].shape[0]
         device = feats[0].device
 
         masks = []
         for feat in feats:
             _, _, h, w = feat.shape
-            masks.append(torch.zeros(b, self.nc, h, w, device=device, dtype=torch.bool))
+            masks.append(
+                torch.zeros(
+                    b,
+                    self.nc,
+                    h,
+                    w,
+                    device=device,
+                    dtype=torch.bool,
+                )
+            )
 
-        if batch["bboxes"].numel() == 0:
+        if "bboxes" not in batch or batch["bboxes"].numel() == 0:
             return masks
 
         batch_idx = batch["batch_idx"].long().view(-1)
@@ -137,40 +337,76 @@ class AdaptiveReviewKD(nn.Module):
         boxes = batch["bboxes"]
 
         for bi, ci, box in zip(batch_idx, cls, boxes):
+            bi = int(bi.item())
             ci = int(ci.item())
+
+            if bi < 0 or bi >= b:
+                continue
+
             if ci < 0 or ci >= self.nc:
                 continue
+
             # normalized xywh
             cx, cy, bw, bh = box
+
             for li, feat in enumerate(feats):
                 _, _, h, w = feat.shape
+
                 x1 = ((cx - bw / 2) * w).floor().long().clamp(0, w - 1)
                 y1 = ((cy - bh / 2) * h).floor().long().clamp(0, h - 1)
                 x2 = ((cx + bw / 2) * w).ceil().long().clamp(0, w - 1)
                 y2 = ((cy + bh / 2) * h).ceil().long().clamp(0, h - 1)
+
+                x1 = int(x1.item())
+                y1 = int(y1.item())
+                x2 = int(x2.item())
+                y2 = int(y2.item())
+
                 if x2 < x1 or y2 < y1:
                     continue
+
                 masks[li][bi, ci, y1:y2 + 1, x1:x2 + 1] = True
+
         return masks
+
+    def _flatten_pred_tensors(self, pred):
+        """
+        从 teacher 输出中递归提取 Tensor。
+        """
+        tensors = []
+
+        if torch.is_tensor(pred):
+            tensors.append(pred)
+
+        elif isinstance(pred, dict):
+            for v in pred.values():
+                tensors.extend(self._flatten_pred_tensors(v))
+
+        elif isinstance(pred, (list, tuple)):
+            for v in pred:
+                tensors.extend(self._flatten_pred_tensors(v))
+
+        return tensors
 
     def _extract_teacher_cls_maps(self, t_pred, t_feats):
         """
         尝试从 teacher raw pred 中提取每个检测层的类别概率图。
 
-        对 YOLO 类模型，一般 raw pred 可能是 list[Tensor]，
-        Tensor shape 可能是 [B, no, H, W]，其中最后 nc 个通道通常是分类 logits。
+        对 YOLO 类模型：
+            raw pred 可能是 list[Tensor]
+            Tensor shape 可能是 [B, no, H, W]
+            最后 nc 个通道通常是分类 logits。
 
-        如果你的 teacher 输出结构不同，可以只改这个函数。
+        如果无法提取，则返回 None，后续 R=1, U=0 作为 fallback。
         """
-        if isinstance(t_pred, dict):
-            # 对 one2one / one2many 结构，优先用 one2many
-            t_pred = t_pred.get("one2many", t_pred.get("one2one", t_pred))
 
-        if not isinstance(t_pred, (list, tuple)):
+        if t_pred is None:
             return None
 
+        tensors = self._flatten_pred_tensors(t_pred)
+
         candidates = []
-        for x in t_pred:
+        for x in tensors:
             if torch.is_tensor(x) and x.ndim == 4 and x.shape[1] >= self.nc:
                 candidates.append(x)
 
@@ -178,8 +414,10 @@ class AdaptiveReviewKD(nn.Module):
             return None
 
         cls_maps = []
+
         for i, feat in enumerate(t_feats):
             raw = candidates[min(i, len(candidates) - 1)]
+
             cls_logits = raw[:, -self.nc:, :, :]
             prob = cls_logits.sigmoid()
 
@@ -199,12 +437,19 @@ class AdaptiveReviewKD(nn.Module):
         """
         R_l,c 和 U_l,c。
 
-        R_l,c：前景区域类别 c 的平均教师置信度。
-        U_l,c：前景区域 teacher 分类分布熵，归一化到 [0, 1]。
+        R_l,c：
+            前景区域类别 c 的平均教师置信度。
+
+        U_l,c：
+            前景区域 teacher 分类分布熵，归一化到 [0, 1]。
         """
-        if cls_map is None or mask.sum() == 0:
+
+        if cls_map is None or mask.sum().item() == 0:
             device = mask.device
-            return torch.tensor(1.0, device=device), torch.tensor(0.0, device=device)
+            return (
+                torch.tensor(1.0, device=device),
+                torch.tensor(0.0, device=device),
+            )
 
         p_c = cls_map[:, c, :, :][mask].clamp(self.eps, 1.0)
         r_lc = p_c.mean()
@@ -214,23 +459,30 @@ class AdaptiveReviewKD(nn.Module):
 
         entropy = -(all_p * all_p.log()).sum(dim=-1)
         entropy = entropy / math.log(max(self.nc, 2))
+
         u_lc = entropy.mean().clamp(0.0, 1.0)
 
         return r_lc, u_lc
 
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
     def forward(self, s_feats, t_feats, batch, t_pred=None, epoch=0, epochs=1):
         """
         Return:
             proto_feature_loss:
-                适配性感知的类别原型特征蒸馏损失，对应论文中的 A_l,c * φ(F_T, F_S)。
-                这里用 prototype MSE 作为轻量实现。
+                A_l,c 加权的类别原型特征蒸馏损失。
 
             review_loss:
-                历史教师原型复习损失，已经乘上 λ_re。
+                历史教师原型复习损失，已经乘上 lambda_re。
 
             adapt_mean:
-                当前 batch 的平均 A_l,c，可用于重新加权原有 CWD/MGD/KL feature loss。
+                当前 batch 的平均 A_l,c，可用于重加权原始 CWD/MGD/KL feature loss。
+
+            log_dict:
+                用于 save_metrics() 的日志项。
         """
+
         self.build_once(s_feats, t_feats)
 
         s_feats = [proj(sf) for proj, sf in zip(self.projectors, s_feats)]
@@ -241,10 +493,19 @@ class AdaptiveReviewKD(nn.Module):
 
         proto_feature_loss = s_feats[0].new_zeros(())
         review_loss = s_feats[0].new_zeros(())
-        adapt_values = []
-        valid_pairs = 0
 
-        lambda_re = math.sin(math.pi * float(epoch + 1) / max(float(epochs), 1.0))
+        adapt_values = []
+        r_values = []
+        q_values = []
+        sim_values = []
+        g_values = []
+        u_values = []
+
+        valid_pairs = 0
+        memory_update_count = 0
+        memory_valid_count = 0
+
+        lambda_re = self.get_review_lambda(epoch, epochs)
 
         for li, (sf, tf, mask_l) in enumerate(zip(s_feats, t_feats, fg_masks)):
             sf_norm = self._spatial_norm(sf, self.eps)
@@ -253,80 +514,140 @@ class AdaptiveReviewKD(nn.Module):
             memory = self._memory(li)
             valid = self._valid(li)
 
+            memory_valid_count += int(valid.sum().item())
+
             cls_map = None if cls_maps is None else cls_maps[li]
 
             for c in range(self.nc):
                 mask = mask_l[:, c, :, :]
 
-                if mask.sum() == 0:
+                if mask.sum().item() == 0:
                     continue
 
-                # [num_fg, C]
                 sf_points = sf.permute(0, 2, 3, 1)[mask]
                 tf_points = tf.permute(0, 2, 3, 1)[mask]
 
                 if sf_points.numel() == 0 or tf_points.numel() == 0:
                     continue
 
+                # ------------------------------------------------------
                 # P_S,l,c and P_T,l,c
+                # ------------------------------------------------------
                 ps = sf_points.mean(dim=0)
                 pt = tf_points.mean(dim=0)
 
+                # ------------------------------------------------------
                 # Sim_l,c
+                # ------------------------------------------------------
                 sim_lc = 0.5 * (
-                    1.0 + F.cosine_similarity(ps.unsqueeze(0), pt.unsqueeze(0), dim=1).squeeze(0)
+                    1.0
+                    + F.cosine_similarity(
+                        ps.unsqueeze(0),
+                        pt.unsqueeze(0),
+                        dim=1,
+                    ).squeeze(0)
                 )
                 sim_lc = sim_lc.clamp(0.0, 1.0)
 
-                # D_l,c and G_l,c
+                # ------------------------------------------------------
+                # G_l,c
+                # ------------------------------------------------------
                 sf_norm_points = sf_norm.permute(0, 2, 3, 1)[mask]
                 tf_norm_points = tf_norm.permute(0, 2, 3, 1)[mask]
 
                 d_lc = torch.abs(sf_norm_points - tf_norm_points).mean()
-                g_lc = torch.exp(-d_lc / self.tau_g).clamp(0.0, 1.0)
+                g_lc = torch.exp(-d_lc / self.aks_tau_g).clamp(0.0, 1.0)
 
+                # ------------------------------------------------------
                 # R_l,c and U_l,c
-                r_lc, u_lc = self._calc_reliability_uncertainty(cls_map, mask, c)
+                # ------------------------------------------------------
+                r_lc, u_lc = self._calc_reliability_uncertainty(
+                    cls_map,
+                    mask,
+                    c,
+                )
 
+                # ------------------------------------------------------
                 # Q_l,c
-                # 如果你已有 teacher box decode，可以在这里替换成 IoU(b_T, b_gt)。
-                # 当前版本没有侵入 YOLO 解码器，因此默认用 R_l,c 作为定位质量近似项。
-                q_lc = r_lc if self.use_q_fallback else torch.tensor(1.0, device=sf.device)
+                # 当前未接入 teacher box decode，因此默认用 R_l,c 近似。
+                # 如果你后续有 decoded teacher boxes，可以在这里替换为真实 IoU。
+                # ------------------------------------------------------
+                if self.use_q_fallback:
+                    q_lc = r_lc
+                else:
+                    q_lc = torch.ones_like(r_lc)
 
-                # A_l,c = 0.24R + 0.24Q + 0.20Sim + 0.20G + 0.12(1-U)
-                a_lc = (
-                    0.24 * r_lc
-                    + 0.24 * q_lc
-                    + 0.20 * sim_lc
-                    + 0.20 * g_lc
-                    + 0.12 * (1.0 - u_lc)
-                ).clamp(0.0, 1.0)
+                # ------------------------------------------------------
+                # A_l,c
+                # ------------------------------------------------------
+                a_lc = self.compute_adaptation_score(
+                    r_lc=r_lc,
+                    q_lc=q_lc,
+                    sim_lc=sim_lc,
+                    g_lc=g_lc,
+                    u_lc=u_lc,
+                )
 
-                # 通常建议 detach，避免学生通过改变 A_l,c 来“逃避”蒸馏约束
-                a_detach = a_lc.detach()
-                adapt_values.append(a_detach)
+                adapt_values.append(a_lc.detach())
+                r_values.append(r_lc.detach())
+                q_values.append(q_lc.detach())
+                sim_values.append(sim_lc.detach())
+                g_values.append(g_lc.detach())
+                u_values.append(u_lc.detach())
 
-                # 适配性感知当前特征原型蒸馏，对应 L_feature 的层级类别级实现
-                proto_feature_loss = proto_feature_loss + a_detach * F.mse_loss(ps, pt)
+                # ------------------------------------------------------
+                # 1. Prototype feature KD
+                # ------------------------------------------------------
+                if self.use_proto_feature_kd:
+                    proto_feature_loss = proto_feature_loss + a_lc * F.mse_loss(ps, pt)
 
-                # 历史教师原型复习损失
-                if valid[c]:
+                # ------------------------------------------------------
+                # 2. Historical prototype review
+                # ------------------------------------------------------
+                if self.use_review and valid[c]:
                     old_pt = memory[c].detach()
-                    review_consistency = 0.5 * (
-                        1.0 + F.cosine_similarity(pt.unsqueeze(0), old_pt.unsqueeze(0), dim=1).squeeze(0)
-                    )
-                    review_consistency = review_consistency.clamp(0.0, 1.0).detach()
 
-                    review_loss = review_loss + a_detach * review_consistency * F.mse_loss(ps, old_pt)
+                    if self.review_use_consistency:
+                        review_consistency = 0.5 * (
+                            1.0
+                            + F.cosine_similarity(
+                                pt.unsqueeze(0),
+                                old_pt.unsqueeze(0),
+                                dim=1,
+                            ).squeeze(0)
+                        )
+                        review_consistency = review_consistency.clamp(0.0, 1.0).detach()
+                    else:
+                        review_consistency = torch.ones_like(a_lc)
 
-                # 更新历史教师原型池 M_l,c
-                with torch.no_grad():
-                    if a_detach > self.theta_h:
-                        if valid[c]:
-                            memory[c].mul_(self.momentum).add_(pt.detach(), alpha=1.0 - self.momentum)
+                    if self.review_use_adapt_gate:
+                        review_gate = a_lc
+                    else:
+                        review_gate = torch.ones_like(a_lc)
+
+                    review_loss = review_loss + review_gate * review_consistency * F.mse_loss(ps, old_pt)
+
+                # ------------------------------------------------------
+                # 3. Update historical teacher prototype memory
+                # ------------------------------------------------------
+                if self.use_review:
+                    with torch.no_grad():
+                        if self.review_update_with_aks:
+                            allow_update = bool((a_lc.detach() > self.review_theta_h).item())
                         else:
-                            memory[c].copy_(pt.detach())
-                            valid[c] = True
+                            allow_update = True
+
+                        if allow_update:
+                            if valid[c]:
+                                memory[c].mul_(self.review_momentum).add_(
+                                    pt.detach(),
+                                    alpha=1.0 - self.review_momentum,
+                                )
+                            else:
+                                memory[c].copy_(pt.detach())
+                                valid[c] = True
+
+                            memory_update_count += 1
 
                 valid_pairs += 1
 
@@ -337,9 +658,47 @@ class AdaptiveReviewKD(nn.Module):
         else:
             adapt_mean = s_feats[0].new_tensor(1.0)
 
-        review_loss = review_loss * lambda_re
+        review_loss = review_loss * float(lambda_re)
 
-        return proto_feature_loss, review_loss, adapt_mean
+        if len(adapt_values) > 0:
+            a_stack = torch.stack(adapt_values)
+            r_stack = torch.stack(r_values)
+            q_stack = torch.stack(q_values)
+            sim_stack = torch.stack(sim_values)
+            g_stack = torch.stack(g_values)
+            u_stack = torch.stack(u_values)
+
+            log_dict = {
+                "aks/A_mean": a_stack.mean(),
+                "aks/A_min": a_stack.min(),
+                "aks/A_max": a_stack.max(),
+                "aks/R_mean": r_stack.mean(),
+                "aks/Q_mean": q_stack.mean(),
+                "aks/Sim_mean": sim_stack.mean(),
+                "aks/G_mean": g_stack.mean(),
+                "aks/U_mean": u_stack.mean(),
+                "review/lambda": float(lambda_re),
+                "review/memory_updates": float(memory_update_count),
+                "review/memory_valid": float(memory_valid_count),
+                "review/valid_pairs": float(valid_pairs),
+            }
+        else:
+            log_dict = {
+                "aks/A_mean": float(1.0),
+                "aks/A_min": float(1.0),
+                "aks/A_max": float(1.0),
+                "aks/R_mean": float(1.0),
+                "aks/Q_mean": float(1.0),
+                "aks/Sim_mean": float(1.0),
+                "aks/G_mean": float(1.0),
+                "aks/U_mean": float(0.0),
+                "review/lambda": float(lambda_re),
+                "review/memory_updates": float(0.0),
+                "review/memory_valid": float(memory_valid_count),
+                "review/valid_pairs": float(0.0),
+            }
+
+        return proto_feature_loss, review_loss, adapt_mean, log_dict
 
 
 def get_activation(feat, backbone_idx=-1):
@@ -772,26 +1131,60 @@ class DetectionDistiller(BaseTrainer):
         self._setup_train(world_size)
         
         ## add
-        # Adaptive Knowledge Selection + Prototype Review KD
-        self.use_adaptive_review_kd = getattr(self.args, 'use_adaptive_review_kd', False)
+        # ------------------------------------------------------------
+        # Adaptive Knowledge Selection + Historical Prototype Review KD
+        # ------------------------------------------------------------
+        self.use_adaptive_review_kd = getattr(self.args, "use_adaptive_review_kd", True)
 
         if self.use_adaptive_review_kd:
-            nc = getattr(de_parallel(self.model), 'nc', None)
+            nc = getattr(de_parallel(self.model), "nc", None)
+
             if nc is None:
-                nc = getattr(self, 'data', {}).get('nc', None)
+                nc = getattr(self, "data", {}).get("nc", None)
+
             if nc is None:
-                nc = len(getattr(self, 'names', []))
+                nc = len(getattr(self, "names", []))
 
             self.adaptive_review_kd = AdaptiveReviewKD(
                 nc=nc,
-                eta_t=getattr(self.args, 'aks_eta_t', 0.6),
-                eta_s=getattr(self.args, 'aks_eta_s', 0.4),
-                tau_g=getattr(self.args, 'aks_tau_g', 1.0),
-                theta_h=getattr(self.args, 'review_theta_h', 0.5),
-                momentum=getattr(self.args, 'review_momentum', 0.999),
+
+                # module-level ablation
+                use_aks=getattr(self.args, "use_aks", True),
+                use_review=getattr(self.args, "use_review", True),
+                use_proto_feature_kd=getattr(self.args, "use_proto_feature_kd", True),
+
+                # AKS component ablation
+                aks_use_r=getattr(self.args, "aks_use_r", True),
+                aks_use_q=getattr(self.args, "aks_use_q", True),
+                aks_use_sim=getattr(self.args, "aks_use_sim", True),
+                aks_use_g=getattr(self.args, "aks_use_g", True),
+                aks_use_u=getattr(self.args, "aks_use_u", True),
+
+                aks_w_r=getattr(self.args, "aks_w_r", 0.24),
+                aks_w_q=getattr(self.args, "aks_w_q", 0.24),
+                aks_w_sim=getattr(self.args, "aks_w_sim", 0.20),
+                aks_w_g=getattr(self.args, "aks_w_g", 0.20),
+                aks_w_u=getattr(self.args, "aks_w_u", 0.12),
+
+                aks_tau_g=getattr(self.args, "aks_tau_g", 1.0),
+                aks_detach=getattr(self.args, "aks_detach", True),
+                aks_renorm_weights=getattr(self.args, "aks_renorm_weights", True),
+                use_q_fallback=getattr(self.args, "use_q_fallback", True),
+
+                # Review ablation
+                review_use_adapt_gate=getattr(self.args, "review_use_adapt_gate", True),
+                review_use_consistency=getattr(self.args, "review_use_consistency", True),
+                review_update_with_aks=getattr(self.args, "review_update_with_aks", True),
+                review_theta_h=getattr(self.args, "review_theta_h", 0.5),
+                review_momentum=getattr(self.args, "review_momentum", 0.999),
+                review_lambda_schedule=getattr(self.args, "review_lambda_schedule", "sine"),
             ).to(self.device)
         else:
             self.adaptive_review_kd = None
+
+        self.aks_log_dict = {}
+        self._adaptive_review_kd_params_added = False
+
 
 
 
@@ -861,8 +1254,9 @@ class DetectionDistiller(BaseTrainer):
             self.tloss = None
             self.logical_disloss = torch.zeros(1, device=self.device)
             self.feature_disloss = torch.zeros(1, device=self.device)
-            ##add
+             ##add
             self.review_disloss = torch.zeros(1, device=self.device)
+            self.proto_disloss = torch.zeros(1, device=self.device)
 
             self.optimizer.zero_grad()
             for i, batch in pbar:
@@ -928,7 +1322,12 @@ class DetectionDistiller(BaseTrainer):
                     main_loss, self.loss_items = de_parallel(self.model).criterion(pred, batch)
                     
                     log_distill_loss, fea_distill_loss = torch.zeros(1, device=self.device), torch.zeros(1, device=self.device)
-                    
+                    ##add
+                    review_loss = torch.zeros(1, device=self.device)
+                    proto_fea_loss = torch.zeros(1, device=self.device)
+                    adapt_weight = torch.ones(1, device=self.device)
+                    aks_log_dict = {}
+
                     if self.kd_logical_loss is not None:
                         if type(pred) is dict and type(t_pred) is dict:
                             log_distill_loss = self.kd_logical_loss(pred['one2one'], t_pred['one2one'], batch, True) * self.args.logical_loss_ratio
@@ -937,21 +1336,23 @@ class DetectionDistiller(BaseTrainer):
                             log_distill_loss = self.kd_logical_loss(pred, t_pred, batch) * self.args.logical_loss_ratio
                     # if self.kd_feature_loss is not None:
                     #     fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
+                    
                     ##add
-                    review_loss = torch.zeros(1, device=self.device)
+                    # Feature KD + AKS + Review
                     if self.kd_feature_loss is not None:
                         s_kd_feats = [s_feature[i] for i in s_feature_idx]
                         t_kd_feats = [t_feature[i] for i in t_feature_idx]
 
                         # 原始公开可复现特征蒸馏损失，例如 CWD / MGD / KL
-                        base_fea_distill_loss = self.kd_feature_loss(s_kd_feats, t_kd_feats)
+                        base_fea_distill_loss = self.kd_feature_loss(
+                            s_kd_feats,
+                            t_kd_feats,
+                        )
 
                         if self.adaptive_review_kd is not None:
-                            # 第一次使用时构建 conv1x1 projector。
-                            # 如果 projector 是 Conv2d，需要加入 optimizer，否则不会更新。
                             was_built = self.adaptive_review_kd.built
 
-                            proto_fea_loss, review_loss, adapt_weight = self.adaptive_review_kd(
+                            proto_fea_loss, review_loss, adapt_weight, aks_log_dict = self.adaptive_review_kd(
                                 s_kd_feats,
                                 t_kd_feats,
                                 batch=batch,
@@ -960,46 +1361,57 @@ class DetectionDistiller(BaseTrainer):
                                 epochs=self.epochs,
                             )
 
-                            if not was_built:
-                                new_params = []
-                                for p in self.adaptive_review_kd.projectors.parameters():
-                                    if p.requires_grad:
-                                        new_params.append(p)
+                            # 如果第一次 forward 创建了 1x1 Conv projector，需要加入 optimizer
+                            if (not was_built) and (not self._adaptive_review_kd_params_added):
+                                new_params = [
+                                    p for p in self.adaptive_review_kd.projectors.parameters()
+                                    if p.requires_grad
+                                ]
 
-                                if len(new_params):
+                                if len(new_params) > 0:
+                                    base_pg = self.optimizer.param_groups[0]
+
                                     self.optimizer.add_param_group({
-                                        'params': new_params,
-                                        'lr': self.optimizer.param_groups[0]['lr'],
-                                        'initial_lr': self.optimizer.param_groups[0].get(
-                                            'initial_lr',
-                                            self.optimizer.param_groups[0]['lr']
-                                        ),
-                                        'momentum': self.optimizer.param_groups[0].get('momentum', self.args.momentum),
-                                        'weight_decay': self.optimizer.param_groups[0].get('weight_decay', 0.0),
+                                        "params": new_params,
+                                        "lr": base_pg["lr"],
+                                        "initial_lr": base_pg.get("initial_lr", base_pg["lr"]),
+                                        "momentum": base_pg.get("momentum", getattr(self.args, "momentum", 0.937)),
+                                        "weight_decay": base_pg.get("weight_decay", 0.0),
                                     })
 
-                            # 组合方式：
-                            # 1. base_fea_distill_loss * adapt_weight：对原 CWD/MGD/KL 做整体适配性重加权
-                            # 2. proto_fea_loss：显式层级类别级 A_l,c 原型蒸馏
+                                self._adaptive_review_kd_params_added = True
+
+                            # 是否用 A_l,c 重加权原始 feature KD
+                            if getattr(self.args, "use_aks", True):
+                                base_fea_distill_loss = base_fea_distill_loss * adapt_weight
+
+                            # 最终 feature KD：
+                            #   原 feature KD + 类别原型 feature KD
                             fea_distill_loss = (
-                                base_fea_distill_loss * adapt_weight + proto_fea_loss
+                                base_fea_distill_loss + proto_fea_loss
                             ) * self.args.feature_loss_ratio
 
                         else:
                             fea_distill_loss = base_fea_distill_loss * self.args.feature_loss_ratio
 
-                    
+                    if aks_log_dict:
+                        self.aks_log_dict = aks_log_dict
+
+
                     # self.loss = main_loss + (
                     #     log_distill_loss + fea_distill_loss
                     #  ) * batch['img'].size(0) * distill_decay
                     
-                    review_loss_ratio = getattr(self.args, 'review_loss_ratio', 0.5)
-
+                    review_loss_ratio = getattr(self.args, "review_loss_ratio", 0.5)
+                    
+                    # L = L_det + L_logical + L_feature + λ_review * L_review
+                    # L_feature = A_l,c 加权后的原 feature KD + A_l,c 加权的类别原型 KD
+                    # L_review = λ_re * A_l,c * r_l,c * ||P_S,l,c - M_l,c||^2
                     self.loss = main_loss + (
                         log_distill_loss
                         + fea_distill_loss
-                        # + review_loss * review_loss_ratio
-                    ) * batch['img'].size(0) * distill_decay
+                        + review_loss * review_loss_ratio
+                    ) * batch["img"].size(0) * distill_decay
 
 
                     if RANK != -1:
@@ -1011,11 +1423,11 @@ class DetectionDistiller(BaseTrainer):
                     self.feature_disloss = (self.feature_disloss * i + fea_distill_loss) / (i + 1) if self.feature_disloss is not None \
                         else fea_distill_loss
                     ##add,滑动统计
-                    # self.review_disloss = (self.review_disloss * i + review_loss) / (i + 1) if self.review_disloss is not None \
-                        # else review_loss
-
+                    self.review_disloss = (self.review_disloss * i + review_loss) / (i + 1) if self.review_disloss is not None \
+                        else review_loss
+                    self.proto_disloss = (self.proto_disloss * i + proto_fea_loss) / (i + 1) if self.proto_disloss is not None \
+                        else proto_fea_loss
                     
-
                 # Backward
                 self.scaler.scale(self.loss).backward()
 
@@ -1030,8 +1442,9 @@ class DetectionDistiller(BaseTrainer):
                 losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
                 logical_dislosses = self.logical_disloss if loss_len > 1 else torch.unsqueeze(self.logical_disloss, 0)
                 feature_dislosses = self.feature_disloss if loss_len > 1 else torch.unsqueeze(self.feature_disloss, 0)
-                # ##add pbar显示
-                # review_dislosses = self.review_disloss if loss_len > 1 else torch.unsqueeze(self.review_disloss, 0)
+                ##add,更新进度条
+                review_dislosses = self.review_disloss if loss_len > 1 else torch.unsqueeze(self.review_disloss, 0)
+                proto_dislosses = self.proto_disloss if loss_len > 1 else torch.unsqueeze(self.proto_disloss, 0)
 
 
                 if RANK in (-1, 0):
@@ -1042,7 +1455,8 @@ class DetectionDistiller(BaseTrainer):
                           *losses,
                           *logical_dislosses, 
                           *feature_dislosses,
-                        #   *review_dislosses,
+                        *proto_dislosses,
+                        *review_dislosses,
                             batch['cls'].shape[0], 
                             batch['img'].shape[-1]))
                     self.run_callbacks('on_batch_end')
@@ -1074,7 +1488,30 @@ class DetectionDistiller(BaseTrainer):
 
                 if self.args.val or final_epoch:
                     self.metrics, self.fitness = self.validate()
-                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                # self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                
+                extra_kd_metrics = {}
+                if hasattr(self, "aks_log_dict") and self.aks_log_dict:
+                    for k, v in self.aks_log_dict.items():
+                        if torch.is_tensor(v):
+                            extra_kd_metrics[k] = float(v.detach().cpu())
+                        else:
+                            extra_kd_metrics[k] = float(v)
+                extra_kd_metrics["kd/logical_loss"] = float(self.logical_disloss.detach().cpu().mean())
+                extra_kd_metrics["kd/feature_loss"] = float(self.feature_disloss.detach().cpu().mean())
+                extra_kd_metrics["kd/proto_loss"] = float(self.proto_disloss.detach().cpu().mean())
+                extra_kd_metrics["kd/review_loss"] = float(self.review_disloss.detach().cpu().mean())
+
+                self.save_metrics(
+                    metrics={
+                        **self.label_loss_items(self.tloss),
+                        **self.metrics,
+                        **self.lr,
+                        **extra_kd_metrics,
+                    }
+                )
+
+
                 self.stop = self.stopper(epoch + 1, self.fitness)
 
                 # Save model

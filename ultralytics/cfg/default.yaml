@@ -144,12 +144,47 @@ feature_loss_type: cwd # 'mimic', 'mgd', 'cwd', 'chsim', 'sp'
 feature_loss_ratio: 1.0
 
 ##add
-use_adaptive_review_kd: True
+# use_adaptive_kd=True  use_aks=False use_review=False use_proto_feature_kd=False # 原始 KD baseline
+# use_adaptive_kd=True  use_aks=True use_review=False use_proto_feature_kd=True # # 只加适配性知识选择
+# use_adaptive_kd=True  use_aks=False use_review=True use_proto_feature_kd=False review_use_adapt_gate=False review_update_with_aks=False # # 只加历史复习
+# use_adaptive_kd=True  use_aks=True use_review=True use_proto_feature_kd=True review_use_adapt_gate=True review_update_with_aks=True # 完整
 
-aks_eta_t: 0.6
-aks_eta_s: 0.4
+use_adaptive_kd: True          # 总开关：是否启用本文方法模块
+# ------------------------------
+# Module-level ablation
+# ------------------------------
+use_aks: True                  # 创新点1：适配性知识选择
+use_review: True               # 创新点2：历史原型复习
+use_proto_feature_kd: True     # 是否使用类别原型级 feature KD
+
+# ------------------------------
+# AKS internal ablation
+# ------------------------------
+aks_use_r: True                # 教师分类可靠性 R
+aks_use_q: True                # 教师定位质量 Q
+aks_use_sim: True              # 师生相似性 Sim
+aks_use_g: True                # 师生间隙适配度 G
+aks_use_u: True                # 教师不确定性 U
+# AKS weights
+aks_w_r: 0.24
+aks_w_q: 0.24
+aks_w_sim: 0.20
+aks_w_g: 0.20
+aks_w_u: 0.12
+
 aks_tau_g: 1.0
+aks_detach: True              # 是否 detach A_l,c，建议默认 True
+aks_renorm_weights: True      # 组件消融时是否重新归一化剩余权重
+
+# ------------------------------
+# Review internal ablation
+# ------------------------------
+review_use_adapt_gate: True    # L_review 是否乘 A_l,c
+review_use_consistency: True   # L_review 是否乘 r_l,c
+review_update_with_aks: True   # 原型池更新是否受 A_l,c > theta_h 控制
 
 review_theta_h: 0.5
 review_momentum: 0.999
 review_loss_ratio: 0.5
+review_lambda_schedule: sine   # sine / constant / linear / cosine / none
+
