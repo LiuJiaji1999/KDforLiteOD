@@ -9,11 +9,11 @@ from ultralytics import YOLO
 # 训练时候输出的AMP Check使用的YOLO11n的权重不是代表载入了预训练权重的意思，只是用于测试AMP，正常的不需要理会。
 
 if __name__ == '__main__':
-    model = YOLO('ultralytics/cfg/models/11/yolo11m.yaml') # YOLO11
-    model.load('yolo11m.pt') # loading pretrain weights
+    model = YOLO('ultralytics/cfg/models/11/yolo11n.yaml') # YOLO11
+    model.load('yolo11n.pt') # loading pretrain weights
     model.train(
-                # data='/home/lenovo/data/liujiaji/KDforOD/dataset/publicallpower.yaml',
-                data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
+                data='/home/lenovo/data/liujiaji/KDforOD/dataset/powerdata.yaml',
+                # data='/home/lenovo/data/liujiaji/powerGit/prune-distill/AITOD.yaml',
                 cache=False,
                 imgsz=640,
                 epochs=100,
@@ -27,5 +27,5 @@ if __name__ == '__main__':
                 amp=False, # close amp | loss出现nan可以关闭amp
                 # fraction=0.2,
                 project='runs/train',
-                name='11exp',
+                name='11exp-stu',
                 )

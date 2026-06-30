@@ -9,7 +9,7 @@ from ultralytics.models.yolo.detect.distill import DetectionDistiller
 if __name__ == '__main__':
     param_dict = {
         # origin
-        'model': 'ultralytics/cfg/models/11/yolo11m.yaml', # stu
+        'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
         'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
         'epochs': 100,

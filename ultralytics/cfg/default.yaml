@@ -187,8 +187,8 @@ review_use_adapt_gate: True    # L_review 是否乘 A_l,c
 review_use_consistency: True   # L_review 是否乘 r_l,c
 review_update_with_aks: True   # 原型池更新是否受 A_l,c > theta_h 控制
 
-review_theta_h: 0.5
-review_momentum: 0.999
-review_loss_ratio: 0.5
+review_theta_h: 0.3
+review_momentum: 0.99
+review_rho_max: 0.3
 review_lambda_schedule: sine   # sine / constant / linear / cosine / none
-
+review_loss_ratio: 0.5
