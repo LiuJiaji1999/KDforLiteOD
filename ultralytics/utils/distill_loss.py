@@ -847,29 +847,40 @@ class FeatureLoss(nn.Module):
                 mem = getattr(self, f'review_memory_{li}')
                 valid = getattr(self, f'review_valid_{li}')
                 if self.review_enable and bool(valid[c].item()):
-                    m_proto = mem[c].detach()
+                    m_proto = mem[c].detach().clone()
+                    
                     rr = (F.cosine_similarity(t_proto[None], m_proto[None], dim=1).squeeze(0) + 1.0) * 0.5
                     if not self.use_review_consistency:
                         rr = torch.ones_like(rr)
-                    layer_review.append(A * rr.detach() * F.mse_loss(s_proto, m_proto))
+                    layer_review.append(A.detach() * rr.detach() * F.mse_loss(s_proto, m_proto))
 
                 if self.review_enable and self.update_memory:
                     with torch.no_grad():
                         if bool((KT > self.review_quality_thr).item()):
+                            t_proto_detached = t_proto.detach()
+
                             if bool(valid[c].item()):
-                                mem[c].mul_(self.review_momentum).add_(t_proto, alpha=1.0 - self.review_momentum)
+                                mem[c].mul_(self.review_momentum).add_(t_proto_detached, alpha=1.0 - self.review_momentum)
                             else:
-                                mem[c].copy_(t_proto)
+                                mem[c].copy_(t_proto_detached)
                                 valid[c] = True
 
             A_tensor = torch.stack(layer_A) if layer_A else torch.ones(1, device=device)
-            if self.adapt_norm_weight and A_tensor.numel() > 0:
-                # Bounded affine mapping keeps gradients stable while preserving the direction of A_{l,c}:
-                # low A weakens unreliable/unneeded KD, high A strengthens reliable and needed KD.
-                layer_weight = self.adapt_min_weight + (self.adapt_max_weight - self.adapt_min_weight) * A_tensor.mean()
+            if not self.adapt_enable:
+                layer_weight = torch.ones((), device=device)
             else:
-                layer_weight = A_tensor.mean()
-            layer_weight = layer_weight.clamp(self.adapt_min_weight, self.adapt_max_weight).detach()
+                if self.adapt_norm_weight and A_tensor.numel() > 0:
+                    # Bounded affine mapping keeps gradients stable while preserving the direction of A_{l,c}:
+                    # low A weakens unreliable/unneeded KD, high A strengthens reliable and needed KD.
+                    layer_weight = self.adapt_min_weight + \
+                        (self.adapt_max_weight - self.adapt_min_weight) * A_tensor.mean()
+                else:
+                    layer_weight = A_tensor.mean()
+
+                layer_weight = layer_weight.clamp(
+                    self.adapt_min_weight,
+                    self.adapt_max_weight
+                ).detach()
 
             # Keep the original base distiller as the main signal; add a small A-weighted foreground term.
             base_layer_loss = self.layer_feature_loss[li]([s], [t])

@@ -168,12 +168,12 @@ adapt_entropy_tau: 1.0
 
 # Stable adaptive weighting
 adapt_norm_weight: True # use bounded affine mapping from A to KD weight for stability
-adapt_min_weight: 0.25
-adapt_max_weight: 2.0
-adapt_region_loss_ratio: 0.25 # small foreground class-region auxiliary loss, keeps base KD dominant
+adapt_min_weight: 0.5
+adapt_max_weight: 1.5
+adapt_region_loss_ratio: 0.10 # small foreground class-region auxiliary loss, keeps base KD dominant
 
 # Historical teacher prototype review
-review_ratio: 1.0
+review_ratio: 0.5
 review_momentum: 0.999
 review_quality_thr: 0.5
 review_use_consistency: True

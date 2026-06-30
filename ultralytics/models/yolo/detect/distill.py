@@ -39,6 +39,19 @@ from ultralytics.nn.extra_modules.kernel_warehouse import get_temperature
 # 历史一致性决定知识是否值得复习。
 # 通过三者联合建模，学生模型能够在当前知识学习与历史知识保持之间取得平衡，从而提升目标检测蒸馏的稳定性和有效性。
 
+def get_raw_detect_output(pred):
+    """
+    获取 YOLO 检测头的训练态原始输出。
+
+    教师模型 eval() 时，YOLO 检测头可能返回 (decoded_pred, raw_pred)。
+    蒸馏损失通常需要 raw_pred，因此这里统一抽取 raw_pred，
+    避免 logical KD 或 feature KD 接收到不一致的输出格式。
+    """
+    if isinstance(pred, (tuple, list)) and len(pred) == 2 and isinstance(pred[1], (list, tuple)):
+        return pred[1]
+    return pred
+
+
 def get_activation(feat, backbone_idx=-1):
     def hook(model, inputs, outputs):
         if backbone_idx != -1:
@@ -355,11 +368,15 @@ class DetectionDistiller(BaseTrainer):
     def setup_teacher_model(self):
         ckpt = torch.load(self.args.teacher_weights, map_location=self.device)
         self.teacher_model = ckpt['ema' if ckpt.get('ema') else 'model'].float()
+       
         self.teacher_model.eval()  # important: freeze BN/Dropout statistics for stable teacher knowledge
         for p in self.teacher_model.parameters():
             p.requires_grad_(False)
         self.teacher_model.info()
+
         return ckpt
+    
+
     
     def _setup_train(self, world_size):
         # init model
@@ -608,6 +625,8 @@ class DetectionDistiller(BaseTrainer):
                     
                     with torch.no_grad():
                         t_pred = de_parallel(self.teacher_model).predict(batch['img'])
+                        t_pred_raw = get_raw_detect_output(t_pred)
+
                     
                     main_loss, self.loss_items = de_parallel(self.model).criterion(pred, batch)
                     
@@ -621,7 +640,9 @@ class DetectionDistiller(BaseTrainer):
                             log_distill_loss = self.kd_logical_loss(pred['one2one'], t_pred['one2one'], batch, True) * self.args.logical_loss_ratio
                             log_distill_loss += self.kd_logical_loss(pred['one2many'], t_pred['one2many'], batch) * self.args.logical_loss_ratio * 0.5
                         else:
-                            log_distill_loss = self.kd_logical_loss(pred, t_pred, batch) * self.args.logical_loss_ratio
+                            # log_distill_loss = self.kd_logical_loss(pred, t_pred, batch) * self.args.logical_loss_ratio
+                            log_distill_loss = self.kd_logical_loss(pred, t_pred_raw, batch) * self.args.logical_loss_ratio
+
                     # if self.kd_feature_loss is not None:
                     #     fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
                     
@@ -630,7 +651,7 @@ class DetectionDistiller(BaseTrainer):
                             [s_feature[i] for i in s_feature_idx],
                             [t_feature[i] for i in t_feature_idx],
                             batch=batch,
-                            t_pred=t_pred,
+                            t_pred=t_pred_raw,
                             epoch=epoch,
                             total_epochs=self.epochs
                         ) * self.args.feature_loss_ratio
