@@ -1,7 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 # Default training settings and hyperparameters for medium-augmentation COCO training
 
-task: detect # (str) YOLO task, i.e. detect, segment, classify, pose, obb
+task: detect # (str) YOLO task, i.e. detect, segment, classify, pose
 mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmark
 
 # Train settings -------------------------------------------------------------------------------------------------------
@@ -130,7 +130,7 @@ tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yam
 prune_model: False
 teacher_weights:
 teacher_cfg:
-kd_loss_type: logical # 'logical', 'feature', 'all'
+kd_loss_type: feature # 'logical', 'feature', 'all'
 kd_loss_decay: constant # 'cosine', 'linear', 'cosine_epoch', 'linear_epoch', 'constant'
 
 # logical distillation settings
@@ -140,55 +140,43 @@ logical_loss_ratio: 1.0
 # feature distillation settings
 teacher_kd_layers: 15,18,21
 student_kd_layers: 15,18,21
-feature_loss_type: cwd # 'mimic', 'mgd', 'cwd', 'chsim', 'sp'
+feature_loss_type: adaptive_review # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
 feature_loss_ratio: 1.0
 
-##add
-# 1.原始 KD baseline
-# use_adaptive_review_kd=True  use_aks=False use_review=False use_proto_feature_kd=False 
-# 2.只加适配性知识选择
-# use_adaptive_review_kd=True  use_aks=True use_review=False use_proto_feature_kd=True 
-# 3.只加历史复习
-# use_adaptive_review_kd=True  use_aks=False use_review=True use_proto_feature_kd=False review_use_adapt_gate=False review_update_with_aks=False #
-# 4.完整
-# use_adaptive_review_kd=True  use_aks=True use_review=True use_proto_feature_kd=True review_use_adapt_gate=True review_update_with_aks=True
+# Adaptive Review Feature Distillation settings
+# Module-level ablation:
+#   baseline feature KD: feature_loss_type=cwd/mgd/mimic/chsim/sp/pkd
+#   adaptive only: feature_loss_type=adaptive_review, review_enable=False
+#   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
+#   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
+adapt_base_loss_type: cwd # base feature distiller wrapped by adaptive_review: 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
+adapt_enable: True
+review_enable: True
 
-use_adaptive_review_kd: True          # 是否启用本文方法模块
-# ------------------------------
-# Module-level ablation
-# ------------------------------
-use_aks: True                  # 创新点1：适配性知识选择
-use_review: True               # 创新点2：历史原型复习
-use_proto_feature_kd: True     # 是否使用类别原型级 feature KD
+# Teacher quality K_T ablation
+adapt_use_teacher_quality: True
+adapt_use_R: True # teacher class reliability
+adapt_use_Q: True # teacher localization quality; falls back to confidence proxy if boxes cannot be decoded
+adapt_use_U: True # teacher uncertainty
 
-# ------------------------------
-# AKS internal ablation
-# ------------------------------
-aks_use_r: True                # 教师分类可靠性 R
-aks_use_q: True                # 教师定位质量 Q
-aks_use_sim: True              # 师生相似性 Sim
-aks_use_g: True                # 师生间隙适配度 G
-aks_use_u: True                # 教师不确定性 U
-# AKS weights
-aks_w_r: 0.24
-aks_w_q: 0.24
-aks_w_sim: 0.20
-aks_w_g: 0.20
-aks_w_u: 0.12
+# Student learning demand K_S ablation
+adapt_use_student_demand: True
+adapt_use_Sim: True # teacher-student feature similarity
+adapt_use_G: True # normalized feature gap adaptation
+adapt_tau_gap: 1.0
+adapt_entropy_tau: 1.0
 
-aks_tau_g: 1.0
-aks_detach: True              # 是否 detach A_l,c，建议默认 True
-aks_renorm_weights: True      # 组件消融时是否重新归一化剩余权重
+# Stable adaptive weighting
+adapt_norm_weight: True # use bounded affine mapping from A to KD weight for stability
+adapt_min_weight: 0.25
+adapt_max_weight: 2.0
+adapt_region_loss_ratio: 0.25 # small foreground class-region auxiliary loss, keeps base KD dominant
 
-# ------------------------------
-# Review internal ablation
-# ------------------------------
-review_use_adapt_gate: True    # L_review 是否乘 A_l,c
-review_use_consistency: True   # L_review 是否乘 r_l,c
-review_update_with_aks: True   # 原型池更新是否受 A_l,c > theta_h 控制
-
-review_theta_h: 0.3
-review_momentum: 0.99
-review_rho_max: 0.3
-review_lambda_schedule: sine   # sine / constant / linear / cosine / none
-review_loss_ratio: 0.5
+# Historical teacher prototype review
+review_ratio: 1.0
+review_momentum: 0.999
+review_quality_thr: 0.5
+review_use_consistency: True
+review_update_memory: True
+review_start_epoch: 0
+review_schedule: sine # 'sine', 'constant', 'linear'

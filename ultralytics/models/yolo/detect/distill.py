@@ -33,6 +33,12 @@ from ultralytics.utils.torch_utils import ModelEMA, EarlyStopping, one_cycle, in
 from ultralytics.utils.distill_loss import LogicalLoss, FeatureLoss
 from ultralytics.nn.extra_modules.kernel_warehouse import get_temperature
 
+
+# 教师质量决定知识是否可信，
+# 学生学习需求决定知识是否值得继续蒸馏，
+# 历史一致性决定知识是否值得复习。
+# 通过三者联合建模，学生模型能够在当前知识学习与历史知识保持之间取得平衡，从而提升目标检测蒸馏的稳定性和有效性。
+
 def get_activation(feat, backbone_idx=-1):
     def hook(model, inputs, outputs):
         if backbone_idx != -1:
@@ -124,6 +130,11 @@ class DetectionDistiller(BaseTrainer):
         self.tloss = None
         self.logical_disloss = None
         self.feature_disloss = None
+        # ------------------------------------------------------------
+        # 3) In __init__(), after self.feature_disloss = None, add:
+        self.review_disloss = None
+        self.adapt_weight = None
+
         self.loss_names = ['Loss']
         self.csv = self.save_dir / 'results.csv'
         self.plot_idx = [0, 1, 2]
@@ -197,10 +208,17 @@ class DetectionDistiller(BaseTrainer):
         else:
             return keys
 
+    # def progress_string(self):
+    #     """Returns a formatted string of training progress with epoch, GPU memory, loss, instances and size."""
+    #     return ('\n' + '%11s' *
+    #             (4 + len(self.loss_names) + 2)) % ('Epoch', 'GPU_mem', *self.loss_names, 'log_loss', 'fea_loss', 'Instances', 'Size')
+    # ------------------------------------------------------------
+    # 2) Replace progress_string() with this safer dynamic-header version.
     def progress_string(self):
-        """Returns a formatted string of training progress with epoch, GPU memory, loss, instances and size."""
-        return ('\n' + '%11s' *
-                (4 + len(self.loss_names) + 2)) % ('Epoch', 'GPU_mem', *self.loss_names, 'log_loss', 'fea_loss', 'Instances', 'Size')
+        headers = ('Epoch', 'GPU_mem', *self.loss_names,
+                'log_loss', 'fea_loss', 'rev_loss', 'A_mean', 'Instances', 'Size')
+        return '\n' + ('%11s' * len(headers)) % headers
+
 
     def plot_training_samples(self, batch, ni):
         """Plots training samples with their annotations."""
@@ -316,20 +334,30 @@ class DetectionDistiller(BaseTrainer):
         self.model = self.get_model(cfg=cfg, weights=self.pretrain_weights, verbose=RANK == -1)  # calls Model(cfg, weights)
         return ckpt
     
-    def setup_teacher_model(self):
-        """Load/create/download model for any task."""
-        # model, weights = self.args.teacher_weights, None
-        # ckpt = None
-        # if str(model).endswith('.pt'):
-        #     weights, ckpt = attempt_load_one_weight(model)
-        #     cfg = weights.yaml
-        # else:
-        #     cfg = model
-        # self.teacher_model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
+    # def setup_teacher_model(self):
+    #     """Load/create/download model for any task."""
+    #     # model, weights = self.args.teacher_weights, None
+    #     # ckpt = None
+    #     # if str(model).endswith('.pt'):
+    #     #     weights, ckpt = attempt_load_one_weight(model)
+    #     #     cfg = weights.yaml
+    #     # else:
+    #     #     cfg = model
+    #     # self.teacher_model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
         
+    #     ckpt = torch.load(self.args.teacher_weights, map_location=self.device)
+    #     self.teacher_model = ckpt['ema' if ckpt.get('ema') else 'model'].float()
+    #     self.teacher_model.train()
+    #     self.teacher_model.info()
+    #     return ckpt
+    # ------------------------------------------------------------
+    # 1) Make teacher stable: replace setup_teacher_model() tail with this version.
+    def setup_teacher_model(self):
         ckpt = torch.load(self.args.teacher_weights, map_location=self.device)
         self.teacher_model = ckpt['ema' if ckpt.get('ema') else 'model'].float()
-        self.teacher_model.train()
+        self.teacher_model.eval()  # important: freeze BN/Dropout statistics for stable teacher knowledge
+        for p in self.teacher_model.parameters():
+            p.requires_grad_(False)
         self.teacher_model.info()
         return ckpt
     
@@ -430,7 +458,15 @@ class DetectionDistiller(BaseTrainer):
             s_feature_sort_idx, t_feature_sort_idx = sorted(s_feature_idx), sorted(t_feature_idx)
             s_feature_idx = [s_feature_sort_idx.index(i) for i in s_feature_idx]
             t_feature_idx = [t_feature_sort_idx.index(i) for i in t_feature_idx]
-            self.kd_feature_loss = FeatureLoss([s_feature[i].size(1) for i in s_feature_idx], [t_feature[i].size(1) for i in t_feature_idx], distiller=self.args.feature_loss_type)
+            self.kd_feature_loss = FeatureLoss(
+                [s_feature[i].size(1) for i in s_feature_idx], 
+                [t_feature[i].size(1) for i in t_feature_idx], 
+                distiller=self.args.feature_loss_type,
+            # ------------------------------------------------------------
+            # 4) In _setup_train(), replace FeatureLoss construction with:
+                hyp=self.args,
+                nc=self.data['nc']
+                )
             for hook in hooks:
                 hook.remove()
         
@@ -526,6 +562,13 @@ class DetectionDistiller(BaseTrainer):
             self.tloss = None
             self.logical_disloss = torch.zeros(1, device=self.device)
             self.feature_disloss = torch.zeros(1, device=self.device)
+            
+            # ------------------------------------------------------------
+            # 5) In _do_train(), at each epoch start where losses are reset, replace/add:
+            self.review_disloss = torch.zeros(1, device=self.device)
+            self.adapt_weight = torch.ones(1, device=self.device)
+
+
             self.optimizer.zero_grad()
             for i, batch in pbar:
                 self.run_callbacks('on_train_batch_start')
@@ -569,15 +612,40 @@ class DetectionDistiller(BaseTrainer):
                     main_loss, self.loss_items = de_parallel(self.model).criterion(pred, batch)
                     
                     log_distill_loss, fea_distill_loss = torch.zeros(1, device=self.device), torch.zeros(1, device=self.device)
+                    # ------------------------------------------------------------
+                    # 6) In the AMP forward block, replace the feature loss part with:
+                    review_distill_loss = torch.zeros(1, device=self.device)
+                    adapt_weight_value = torch.ones(1, device=self.device)
                     if self.kd_logical_loss is not None:
                         if type(pred) is dict and type(t_pred) is dict:
                             log_distill_loss = self.kd_logical_loss(pred['one2one'], t_pred['one2one'], batch, True) * self.args.logical_loss_ratio
                             log_distill_loss += self.kd_logical_loss(pred['one2many'], t_pred['one2many'], batch) * self.args.logical_loss_ratio * 0.5
                         else:
                             log_distill_loss = self.kd_logical_loss(pred, t_pred, batch) * self.args.logical_loss_ratio
-                    if self.kd_feature_loss is not None:
-                        fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
+                    # if self.kd_feature_loss is not None:
+                    #     fea_distill_loss = self.kd_feature_loss([s_feature[i] for i in s_feature_idx], [t_feature[i] for i in t_feature_idx]) * self.args.feature_loss_ratio
                     
+                    if self.kd_feature_loss is not None:
+                        fea_distill_loss = self.kd_feature_loss(
+                            [s_feature[i] for i in s_feature_idx],
+                            [t_feature[i] for i in t_feature_idx],
+                            batch=batch,
+                            t_pred=t_pred,
+                            epoch=epoch,
+                            total_epochs=self.epochs
+                        ) * self.args.feature_loss_ratio
+                        # These attributes are maintained by FeatureLoss for logging/ablation diagnosis.
+                        review_distill_loss = getattr(self.kd_feature_loss, 'last_review_loss', review_distill_loss)
+                        adapt_weight_value = getattr(self.kd_feature_loss, 'last_adapt_weight', adapt_weight_value)
+                        if not torch.is_tensor(review_distill_loss):
+                            review_distill_loss = torch.tensor(float(review_distill_loss), device=self.device)
+                        if not torch.is_tensor(adapt_weight_value):
+                            adapt_weight_value = torch.tensor(float(adapt_weight_value), device=self.device)
+                        review_distill_loss = review_distill_loss.to(self.device) * self.args.feature_loss_ratio
+                        adapt_weight_value = adapt_weight_value.to(self.device)
+
+
+             
                     self.loss = main_loss + (log_distill_loss + fea_distill_loss) * batch['img'].size(0) * distill_decay
                     if RANK != -1:
                         self.loss *= world_size
@@ -587,6 +655,14 @@ class DetectionDistiller(BaseTrainer):
                         else log_distill_loss
                     self.feature_disloss = (self.feature_disloss * i + fea_distill_loss) / (i + 1) if self.feature_disloss is not None \
                         else fea_distill_loss
+                    # ------------------------------------------------------------
+                    # 7) After updating self.feature_disloss, also update review/adaptive logs:
+                    self.review_disloss = (self.review_disloss * i + review_distill_loss.detach()) / (i + 1) \
+                        if self.review_disloss is not None else review_distill_loss.detach()
+                    self.adapt_weight = (self.adapt_weight * i + adapt_weight_value.detach()) / (i + 1) \
+                        if self.adapt_weight is not None else adapt_weight_value.detach()
+
+                    
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -602,13 +678,30 @@ class DetectionDistiller(BaseTrainer):
                 losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
                 logical_dislosses = self.logical_disloss if loss_len > 1 else torch.unsqueeze(self.logical_disloss, 0)
                 feature_dislosses = self.feature_disloss if loss_len > 1 else torch.unsqueeze(self.feature_disloss, 0)
+                # if RANK in (-1, 0):
+                #     pbar.set_description(
+                #         ('%11s' * 2 + '%11.4g' * (2 + loss_len + 2)) %
+                #         (f'{epoch + 1}/{self.epochs}', mem, *losses, *logical_dislosses, *feature_dislosses, batch['cls'].shape[0], batch['img'].shape[-1]))
+                #     self.run_callbacks('on_batch_end')
+                #     if self.args.plots and ni in self.plot_idx:
+                #         self.plot_training_samples(batch, ni)
+                # ------------------------------------------------------------
+                # 8) Replace the pbar.set_description() block with:
                 if RANK in (-1, 0):
+                    log_loss_value = self.logical_disloss.reshape(-1)
+                    fea_loss_value = self.feature_disloss.reshape(-1)
+                    rev_loss_value = self.review_disloss.reshape(-1)
+                    adapt_value = self.adapt_weight.reshape(-1)
                     pbar.set_description(
-                        ('%11s' * 2 + '%11.4g' * (2 + loss_len + 2)) %
-                        (f'{epoch + 1}/{self.epochs}', mem, *losses, *logical_dislosses, *feature_dislosses, batch['cls'].shape[0], batch['img'].shape[-1]))
+                        ('%11s' * 2 + '%11.4g' * (loss_len + 6)) %
+                        (f'{epoch + 1}/{self.epochs}', mem,
+                        *losses, *log_loss_value, *fea_loss_value, *rev_loss_value, *adapt_value,
+                        batch['cls'].shape[0], batch['img'].shape[-1])
+                    )
                     self.run_callbacks('on_batch_end')
                     if self.args.plots and ni in self.plot_idx:
                         self.plot_training_samples(batch, ni)
+
 
                 self.run_callbacks('on_train_batch_end')
                 

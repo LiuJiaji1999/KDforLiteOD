@@ -8,6 +8,7 @@ from ultralytics.utils.tal import TaskAlignedAssigner, dist2bbox, make_anchors
 from ultralytics.utils.torch_utils import de_parallel
 
 import functools
+import math
 
 # ------------------------------------------------------------
 class LogicalLoss(nn.Module):
@@ -499,71 +500,414 @@ class BCKD(nn.Module):
         
         return loss_score_kd + loss_ld + loss_kd
 
-# ------------------------------------------------------------ 
-class FeatureLoss(nn.Module):
-    def __init__(self,
-                 channels_s,
-                 channels_t,
-                 distiller='cwd'):
-        super(FeatureLoss, self).__init__()
+class PKDLoss(nn.Module):
+    """Feature PKD-style loss: normalize each feature map then minimize MSE."""
+    def __init__(self, channels_s=None, channels_t=None, eps=1e-6):
+        super().__init__()
+        self.eps = eps
 
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.align_module = nn.ModuleList([
-            nn.Conv2d(channel, tea_channel, kernel_size=1, stride=1,
-                      padding=0).to(device) if channel != tea_channel else nn.Identity()
-            for channel, tea_channel in zip(channels_s, channels_t)
-        ])
-        self.norm = [
-            nn.BatchNorm2d(tea_channel, affine=False).to(device)
-            for tea_channel in channels_t
-        ]
-
-        if (distiller == 'mimic'):
-            self.feature_loss = MimicLoss(channels_s, channels_t)
-        elif (distiller == 'mgd'):
-            self.feature_loss = MGDLoss(channels_s, channels_t)
-        elif (distiller == 'cwd'):
-            self.feature_loss = CWDLoss(channels_s, channels_t)
-        elif (distiller == 'chsim'):
-            self.feature_loss = ChSimLoss(channels_s, channels_t)
-        elif (distiller == 'sp'):
-            self.feature_loss = SPKDLoss(channels_s, channels_t)
-        
-        elif (distiller == 'benin'):
-            self.feature_loss = BENINLoss(channels_s, channels_t)
-        elif (distiller == 'uncertainty'):
-            self.feature_loss = UncerLoss(channels_s, channels_t)
-        elif (distiller == 'dist'):
-            self.feature_loss = DIST(channels_s, channels_t)
-        elif (distiller == 'pkd'):
-            self.feature_loss = PKDLoss(channels_s, channels_t)
-        elif (distiller == 'distrkd'):
-            self.feature_loss = DistanceWiseRKD(channels_s, channels_t)
-        elif (distiller == 'anglerkd'):
-            self.feature_loss = AngleWiseRKD(channels_s, channels_t)
-        elif (distiller == 'wsld'):
-            self.feature_loss = WSLD(channels_s, channels_t)
-        elif (distiller == 'diffkd'):
-            print('using ./diffkd/DiffKD')
-            # self.feature_loss = DiffKD(channels_s, channels_t)
-        
-        else:
-            raise NotImplementedError
+    def _norm(self, x):
+        n, c, h, w = x.shape
+        x = x.view(n, c, -1)
+        mean = x.mean(dim=2, keepdim=True)
+        std = x.std(dim=2, keepdim=True)
+        x = (x - mean) / (std + self.eps)
+        return x.view(n, c, h, w)
 
     def forward(self, y_s, y_t):
         assert len(y_s) == len(y_t)
-        tea_feats = []
-        stu_feats = []
+        losses = []
+        for s, t in zip(y_s, y_t):
+            assert s.shape == t.shape
+            losses.append(F.mse_loss(self._norm(s), self._norm(t)))
+        return sum(losses)
 
+
+def _build_feature_distiller(distiller, channels_s, channels_t):
+    distiller = str(distiller).lower()
+    if distiller == 'mimic':
+        return MimicLoss(channels_s, channels_t)
+    if distiller == 'mgd':
+        return MGDLoss(channels_s, channels_t)
+    if distiller == 'cwd':
+        return CWDLoss(channels_s, channels_t)
+    if distiller == 'chsim':
+        return ChSimLoss(channels_s, channels_t)
+    if distiller == 'sp':
+        return SPKDLoss(channels_s, channels_t)
+    if distiller == 'pkd':
+        return PKDLoss(channels_s, channels_t)
+    raise NotImplementedError(f'Unknown feature distiller: {distiller}')
+
+
+class FeatureLoss(nn.Module):
+    """
+    Feature KD with optional layer-class adaptive selection and historical prototype review.
+
+    Legacy mode:
+        FeatureLoss(..., distiller='cwd') behaves like the original implementation.
+
+    Proposed mode:
+        Set feature_loss_type='adaptive_review'. The base feature distiller is selected by
+        adapt_base_loss_type, e.g. cwd/mgd/mimic/chsim/sp/pkd.
+    """
+    def __init__(self,
+                 channels_s,
+                 channels_t,
+                 distiller='cwd',
+                 hyp=None,
+                 nc=None):
+        super().__init__()
+        assert len(channels_s) == len(channels_t), 'student and teacher feature layers must be paired.'
+
+        self.hyp = hyp
+        self.nc = int(nc if nc is not None else getattr(hyp, 'nc', 80))
+        self.nl = len(channels_t)
+        self.eps = 1e-6
+        self.last_feature_loss = None
+        self.last_review_loss = None
+        self.last_adapt_weight = None
+        self.last_review_lambda = None
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.align_module = nn.ModuleList([
+            nn.Conv2d(channel, tea_channel, kernel_size=1, stride=1, padding=0).to(device)
+            if channel != tea_channel else nn.Identity()
+            for channel, tea_channel in zip(channels_s, channels_t)
+        ])
+        # Register normalization layers correctly; affine=False keeps no extra trainable params.
+        self.norm = nn.ModuleList([
+            nn.BatchNorm2d(tea_channel, affine=False).to(device) for tea_channel in channels_t
+        ])
+
+        self.distiller_name = str(distiller).lower()
+        self.use_adaptive_review = self.distiller_name in ['adaptive_review', 'arfd', 'arkd']
+        self.base_distiller_name = str(getattr(hyp, 'adapt_base_loss_type', 'cwd')).lower() if self.use_adaptive_review else self.distiller_name
+
+        self.feature_loss = _build_feature_distiller(self.base_distiller_name, channels_t, channels_t)
+        self.layer_feature_loss = nn.ModuleList([
+            _build_feature_distiller(self.base_distiller_name, [c], [c]) for c in channels_t
+        ])
+
+        # Module switches for clean ablation.
+        self.adapt_enable = bool(getattr(hyp, 'adapt_enable', True))
+        self.review_enable = bool(getattr(hyp, 'review_enable', True))
+        self.use_teacher_quality = bool(getattr(hyp, 'adapt_use_teacher_quality', True))
+        self.use_student_demand = bool(getattr(hyp, 'adapt_use_student_demand', True))
+        self.use_R = bool(getattr(hyp, 'adapt_use_R', True))
+        self.use_Q = bool(getattr(hyp, 'adapt_use_Q', True))
+        self.use_U = bool(getattr(hyp, 'adapt_use_U', True))
+        self.use_Sim = bool(getattr(hyp, 'adapt_use_Sim', True))
+        self.use_G = bool(getattr(hyp, 'adapt_use_G', True))
+        self.use_review_consistency = bool(getattr(hyp, 'review_use_consistency', True))
+        self.update_memory = bool(getattr(hyp, 'review_update_memory', True))
+
+        self.tau_gap = float(getattr(hyp, 'adapt_tau_gap', 1.0))
+        self.entropy_tau = float(getattr(hyp, 'adapt_entropy_tau', 1.0))
+        self.adapt_min_weight = float(getattr(hyp, 'adapt_min_weight', 0.25))
+        self.adapt_max_weight = float(getattr(hyp, 'adapt_max_weight', 2.0))
+        self.adapt_norm_weight = bool(getattr(hyp, 'adapt_norm_weight', True))
+        self.review_momentum = float(getattr(hyp, 'review_momentum', 0.999))
+        self.review_quality_thr = float(getattr(hyp, 'review_quality_thr', 0.5))
+        self.review_ratio = float(getattr(hyp, 'review_ratio', 1.0))
+        self.review_start_epoch = int(getattr(hyp, 'review_start_epoch', 0))
+        self.review_schedule = str(getattr(hyp, 'review_schedule', 'sine')).lower()
+
+        # Historical teacher prototypes M_{l,c}; one memory matrix per layer because C differs by layer.
+        for li, c in enumerate(channels_t):
+            self.register_buffer(f'review_memory_{li}', torch.zeros(self.nc, c))
+            self.register_buffer(f'review_valid_{li}', torch.zeros(self.nc, dtype=torch.bool))
+
+    def _align_and_norm(self, y_s, y_t):
+        tea_feats, stu_feats = [], []
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
             s = self.align_module[idx](s)
             s = self.norm[idx](s)
-            t = self.norm[idx](t)
+            t = self.norm[idx](t.detach())
             tea_feats.append(t)
             stu_feats.append(s)
+        return stu_feats, tea_feats
 
-        loss = self.feature_loss(stu_feats, tea_feats)
-        return loss
+    def _spatial_standardize(self, x):
+        mean = x.mean(dim=(2, 3), keepdim=True)
+        std = x.std(dim=(2, 3), keepdim=True)
+        return (x - mean) / (std + self.eps)
+
+    def _flatten_pred_maps(self, pred):
+        maps = []
+        if pred is None:
+            return maps
+        if isinstance(pred, dict):
+            # YOLOv10-like heads may return one2many/one2one dictionaries.
+            pred = pred.get('one2many', pred.get('one2one', pred))
+        if isinstance(pred, torch.Tensor):
+            return [pred] if pred.ndim == 4 else []
+        if isinstance(pred, (list, tuple)):
+            for x in pred:
+                maps.extend(self._flatten_pred_maps(x))
+        return maps
+
+    def _match_pred_map(self, pred_maps, h, w):
+        for p in pred_maps:
+            if isinstance(p, torch.Tensor) and p.ndim == 4 and p.shape[2] == h and p.shape[3] == w:
+                return p.detach()
+        return None
+
+    def _decode_layer_boxes(self, p):
+        """Decode YOLO-like DFL distances in feature-cell coordinates for teacher localization quality Q."""
+        if p is None or p.ndim != 4 or p.shape[1] <= self.nc:
+            return None
+        b, no, h, w = p.shape
+        reg_ch = no - self.nc
+        if reg_ch <= 0 or reg_ch % 4 != 0:
+            return None
+        reg_max = reg_ch // 4
+        dist = p[:, :reg_ch].float().view(b, 4, reg_max, h, w).softmax(2)
+        proj = torch.arange(reg_max, device=p.device, dtype=dist.dtype).view(1, 1, reg_max, 1, 1)
+        dist = (dist * proj).sum(2)  # [B,4,H,W], l,t,r,b in cell units
+        yy, xx = torch.meshgrid(torch.arange(h, device=p.device), torch.arange(w, device=p.device), indexing='ij')
+        xx = xx.float() + 0.5
+        yy = yy.float() + 0.5
+        x1 = xx[None] - dist[:, 0]
+        y1 = yy[None] - dist[:, 1]
+        x2 = xx[None] + dist[:, 2]
+        y2 = yy[None] + dist[:, 3]
+        return torch.stack((x1, y1, x2, y2), dim=1)  # [B,4,H,W]
+
+    def _box_iou_vec(self, boxes, gt):
+        # boxes: [N,4], gt: [4] in xyxy.
+        lt = torch.maximum(boxes[:, :2], gt[:2])
+        rb = torch.minimum(boxes[:, 2:], gt[2:])
+        wh = (rb - lt).clamp(min=0)
+        inter = wh[:, 0] * wh[:, 1]
+        area1 = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+        area2 = (gt[2] - gt[0]).clamp(min=0) * (gt[3] - gt[1]).clamp(min=0)
+        return inter / (area1 + area2 - inter + self.eps)
+
+    def _project_box(self, xywh, h, w, device):
+        # batch['bboxes'] is normalized xywh in Ultralytics detection dataloader.
+        x, y, bw, bh = xywh
+        x1 = (x - bw / 2.0) * w
+        y1 = (y - bh / 2.0) * h
+        x2 = (x + bw / 2.0) * w
+        y2 = (y + bh / 2.0) * h
+        fx1, fy1, fx2, fy2 = x1.clamp(0, w), y1.clamp(0, h), x2.clamp(0, w), y2.clamp(0, h)
+        ix1 = int(torch.floor(fx1).item())
+        iy1 = int(torch.floor(fy1).item())
+        ix2 = int(torch.ceil(fx2).item())
+        iy2 = int(torch.ceil(fy2).item())
+        # Guarantee at least one positive feature point for small objects.
+        if ix2 <= ix1:
+            cx = int(torch.clamp(((fx1 + fx2) / 2).round(), 0, w - 1).item())
+            ix1, ix2 = cx, min(cx + 1, w)
+        if iy2 <= iy1:
+            cy = int(torch.clamp(((fy1 + fy2) / 2).round(), 0, h - 1).item())
+            iy1, iy2 = cy, min(cy + 1, h)
+        gt = torch.tensor([fx1, fy1, fx2, fy2], device=device, dtype=torch.float32)
+        return ix1, iy1, ix2, iy2, gt
+
+    def _review_lambda(self, epoch, total_epochs, device):
+        if epoch is None or total_epochs is None or total_epochs <= 1:
+            val = 0.0 if self.review_schedule == 'sine' else 1.0
+        elif epoch < self.review_start_epoch:
+            val = 0.0
+        elif self.review_schedule == 'constant':
+            val = 1.0
+        elif self.review_schedule == 'linear':
+            val = min(max((epoch - self.review_start_epoch) / max(total_epochs - self.review_start_epoch - 1, 1), 0.0), 1.0)
+        else:
+            progress = min(max(epoch / max(total_epochs - 1, 1), 0.0), 1.0)
+            val = math.sin(math.pi * progress)
+        return torch.tensor(float(val), device=device)
+
+    def _teacher_quality(self, R, Q, U):
+        if not self.use_teacher_quality:
+            return torch.ones_like(R)
+        terms, weights = [], []
+        if self.use_R:
+            terms.append(R); weights.append(0.4)
+        if self.use_Q:
+            terms.append(Q); weights.append(0.4)
+        if self.use_U:
+            terms.append(1.0 - U); weights.append(0.2)
+        if not terms:
+            return torch.ones_like(R)
+        return sum(w * t for w, t in zip(weights, terms)) / sum(weights)
+
+    def _student_demand(self, Sim, G):
+        if not self.use_student_demand:
+            return torch.ones_like(Sim)
+        terms = []
+        if self.use_Sim:
+            terms.append(1.0 - Sim)
+        if self.use_G:
+            terms.append(1.0 - G)
+        if not terms:
+            return torch.ones_like(Sim)
+        return sum(terms) / len(terms)
+
+    def _adaptive_review_forward(self, stu_feats, tea_feats, batch, t_pred, epoch, total_epochs):
+        device = stu_feats[0].device
+        pred_maps = self._flatten_pred_maps(t_pred)
+        batch_idx = batch.get('batch_idx', None) if isinstance(batch, dict) else None
+        gt_cls = batch.get('cls', None) if isinstance(batch, dict) else None
+        gt_boxes = batch.get('bboxes', None) if isinstance(batch, dict) else None
+        if batch_idx is None or gt_cls is None or gt_boxes is None or gt_boxes.numel() == 0:
+            base_loss = self.feature_loss(stu_feats, tea_feats)
+            z = base_loss.detach() * 0.0
+            self.last_feature_loss, self.last_review_loss = base_loss.detach(), z
+            self.last_adapt_weight, self.last_review_lambda = torch.tensor(1.0, device=device), z
+            return base_loss
+
+        batch_idx = batch_idx.to(device).long().view(-1)
+        gt_cls = gt_cls.to(device).long().view(-1)
+        gt_boxes = gt_boxes.to(device).float()
+        lambda_re = self._review_lambda(epoch, total_epochs, device)
+
+        feature_losses, review_losses, all_A = [], [], []
+        for li, (s, t) in enumerate(zip(stu_feats, tea_feats)):
+            B, C, H, W = t.shape
+            pmap = self._match_pred_map(pred_maps, H, W)
+            cls_logits = pmap[:, -self.nc:].float() if pmap is not None and pmap.shape[1] >= self.nc else None
+            box_map = self._decode_layer_boxes(pmap) if pmap is not None else None
+
+            class_masks = {}
+            stat = {}
+            for gi in range(gt_boxes.shape[0]):
+                b = int(batch_idx[gi].item())
+                c = int(gt_cls[gi].item())
+                if b < 0 or b >= B or c < 0 or c >= self.nc:
+                    continue
+                ix1, iy1, ix2, iy2, gt_xyxy = self._project_box(gt_boxes[gi], H, W, device)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+                if c not in class_masks:
+                    class_masks[c] = torch.zeros(B, H, W, dtype=torch.bool, device=device)
+                    stat[c] = dict(R_sum=torch.tensor(0.0, device=device),
+                                   U_sum=torch.tensor(0.0, device=device),
+                                   Q_sum=torch.tensor(0.0, device=device),
+                                   n=torch.tensor(0.0, device=device))
+                class_masks[c][b, iy1:iy2, ix1:ix2] = True
+                n = float((iy2 - iy1) * (ix2 - ix1))
+                stat[c]['n'] = stat[c]['n'] + n
+
+                if cls_logits is not None:
+                    region_logits = cls_logits[b, :, iy1:iy2, ix1:ix2]
+                    cls_prob = region_logits[c].sigmoid()
+                    stat[c]['R_sum'] = stat[c]['R_sum'] + cls_prob.sum()
+                    prob = F.softmax(region_logits.flatten(1).transpose(0, 1) / self.entropy_tau, dim=1)
+                    entropy = -(prob * (prob + self.eps).log()).sum(1) / math.log(max(self.nc, 2))
+                    stat[c]['U_sum'] = stat[c]['U_sum'] + entropy.sum()
+                else:
+                    stat[c]['R_sum'] = stat[c]['R_sum'] + n
+
+                if box_map is not None:
+                    boxes = box_map[b, :, iy1:iy2, ix1:ix2].permute(1, 2, 0).reshape(-1, 4)
+                    stat[c]['Q_sum'] = stat[c]['Q_sum'] + self._box_iou_vec(boxes.float(), gt_xyxy).sum()
+                elif cls_logits is not None:
+                    # Safe proxy when decoded boxes are unavailable: confidence also reflects localization tendency.
+                    stat[c]['Q_sum'] = stat[c]['Q_sum'] + cls_prob.detach().sum()
+                else:
+                    stat[c]['Q_sum'] = stat[c]['Q_sum'] + n
+
+            if not class_masks:
+                feature_losses.append(self.layer_feature_loss[li]([s], [t]))
+                continue
+
+            s_std, t_std = self._spatial_standardize(s), self._spatial_standardize(t)
+            layer_A, layer_review = [], []
+            region_feature_losses = []
+            for c, mask in class_masks.items():
+                if mask.sum() <= 0:
+                    continue
+                sp = s.permute(0, 2, 3, 1)[mask]
+                tp = t.permute(0, 2, 3, 1)[mask]
+                s_proto = sp.mean(0)
+                t_proto = tp.mean(0).detach()
+
+                sim = (F.cosine_similarity(s_proto[None], t_proto[None], dim=1).squeeze(0) + 1.0) * 0.5
+                sdp = s_std.permute(0, 2, 3, 1)[mask]
+                tdp = t_std.permute(0, 2, 3, 1)[mask]
+                D = (sdp - tdp).abs().mean()
+                G = torch.exp(-D / max(self.tau_gap, self.eps))
+
+                n = stat[c]['n'].clamp(min=1.0)
+                R = (stat[c]['R_sum'] / n).clamp(0.0, 1.0)
+                U = (stat[c]['U_sum'] / n).clamp(0.0, 1.0) if cls_logits is not None else torch.tensor(0.0, device=device)
+                Q = (stat[c]['Q_sum'] / n).clamp(0.0, 1.0)
+                KT = self._teacher_quality(R, Q, U).clamp(0.0, 1.0)
+                KS = self._student_demand(sim.clamp(0.0, 1.0), G.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+                A = (KT * KS).detach() if self.adapt_enable else torch.ones((), device=device)
+                layer_A.append(A)
+                all_A.append(A)
+
+                # Region-level auxiliary feature KD makes A_{l,c} directly act on class foreground prototypes.
+                region_feature_losses.append(A * F.mse_loss(sp, tp.detach()))
+
+                mem = getattr(self, f'review_memory_{li}')
+                valid = getattr(self, f'review_valid_{li}')
+                if self.review_enable and bool(valid[c].item()):
+                    m_proto = mem[c].detach()
+                    rr = (F.cosine_similarity(t_proto[None], m_proto[None], dim=1).squeeze(0) + 1.0) * 0.5
+                    if not self.use_review_consistency:
+                        rr = torch.ones_like(rr)
+                    layer_review.append(A * rr.detach() * F.mse_loss(s_proto, m_proto))
+
+                if self.review_enable and self.update_memory:
+                    with torch.no_grad():
+                        if bool((KT > self.review_quality_thr).item()):
+                            if bool(valid[c].item()):
+                                mem[c].mul_(self.review_momentum).add_(t_proto, alpha=1.0 - self.review_momentum)
+                            else:
+                                mem[c].copy_(t_proto)
+                                valid[c] = True
+
+            A_tensor = torch.stack(layer_A) if layer_A else torch.ones(1, device=device)
+            if self.adapt_norm_weight and A_tensor.numel() > 0:
+                # Bounded affine mapping keeps gradients stable while preserving the direction of A_{l,c}:
+                # low A weakens unreliable/unneeded KD, high A strengthens reliable and needed KD.
+                layer_weight = self.adapt_min_weight + (self.adapt_max_weight - self.adapt_min_weight) * A_tensor.mean()
+            else:
+                layer_weight = A_tensor.mean()
+            layer_weight = layer_weight.clamp(self.adapt_min_weight, self.adapt_max_weight).detach()
+
+            # Keep the original base distiller as the main signal; add a small A-weighted foreground term.
+            base_layer_loss = self.layer_feature_loss[li]([s], [t])
+            fg_loss = sum(region_feature_losses) / max(len(region_feature_losses), 1) if region_feature_losses else base_layer_loss * 0.0
+            fg_ratio = float(getattr(self.hyp, 'adapt_region_loss_ratio', 0.25))
+            feature_losses.append(base_layer_loss * layer_weight + fg_ratio * fg_loss)
+            if layer_review:
+                review_losses.append(sum(layer_review) / len(layer_review))
+
+        feature_loss = sum(feature_losses) if feature_losses else stu_feats[0].sum() * 0.0
+        review_loss = sum(review_losses) / len(review_losses) if review_losses else feature_loss.detach() * 0.0
+        total = feature_loss + self.review_ratio * lambda_re * review_loss
+
+        self.last_feature_loss = feature_loss.detach()
+        self.last_review_loss = (self.review_ratio * lambda_re * review_loss).detach()
+        self.last_review_lambda = lambda_re.detach()
+        self.last_adapt_weight = torch.stack(all_A).mean().detach() if all_A else torch.tensor(1.0, device=device)
+        return total
+
+    def forward(self, y_s, y_t, batch=None, t_pred=None, epoch=None, total_epochs=None):
+        assert len(y_s) == len(y_t)
+        stu_feats, tea_feats = self._align_and_norm(y_s, y_t)
+        if not self.use_adaptive_review:
+            loss = self.feature_loss(stu_feats, tea_feats)
+            self.last_feature_loss = loss.detach()
+            self.last_review_loss = loss.detach() * 0.0
+            self.last_adapt_weight = torch.tensor(1.0, device=loss.device)
+            self.last_review_lambda = loss.detach() * 0.0
+            return loss
+        if batch is None:
+            # Safe fallback for warmup shape probing or legacy calls.
+            loss = self.feature_loss(stu_feats, tea_feats)
+            self.last_feature_loss = loss.detach()
+            self.last_review_loss = loss.detach() * 0.0
+            self.last_adapt_weight = torch.tensor(1.0, device=loss.device)
+            self.last_review_lambda = loss.detach() * 0.0
+            return loss
+        return self._adaptive_review_forward(stu_feats, tea_feats, batch, t_pred, epoch, total_epochs)
 
 # ------------------------------------------------------------
 class MimicLoss(nn.Module):
@@ -591,7 +935,6 @@ class MimicLoss(nn.Module):
         return loss
 
 # ------------------------------------------------------------
-    # Masked Generative Distillation
 class MGDLoss(nn.Module):
     def __init__(self,
                  channels_s,
@@ -643,134 +986,6 @@ class MGDLoss(nn.Module):
         dis_loss = loss_mse(new_fea, preds_T) / N
 
         return dis_loss
-    
-#-------------------------------------------
-# Bias-variance decomposition knowledge distillation for medical image segmentation
-class BENINLoss(nn.Module):
-    def __init__(self,
-                 channels_s,
-                 channels_t,
-                 alpha_mgd=0.00002,
-                 lambda_mgd=0.75,
-                 a=1):
-        super(BENINLoss, self).__init__()
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.alpha_mgd = alpha_mgd
-        self.lambda_mgd = lambda_mgd
-        self.a = a
-        self.log_sm = torch.nn.LogSoftmax(dim=1)
-        self.sm = torch.nn.Softmax(dim=1)
-
-        if channels_s != channels_t:
-            self.align = nn.Conv2d(channels_s, channels_t, kernel_size=1, stride=1, padding=0)
-        else:
-            self.align = None
-
-
-        self.generation = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(channel, channel, kernel_size=3,
-                          padding=1)).to(device) for channel in channels_t
-        ])
-
-    def forward(self, y_s, y_t):
-        """Forward computation.
-        Args:
-            y_s (list): The student model prediction with
-                shape (N, C, H, W) in list.
-            y_t (list): The teacher model prediction with
-                shape (N, C, H, W) in list.
-        Return:
-            torch.Tensor: The calculated loss value of all stages.
-        """
-        assert len(y_s) == len(y_t)
-        losses = []
-        for idx, (s, t) in enumerate(zip(y_s, y_t)):
-            assert s.shape == t.shape
-            losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
-        loss = sum(losses)
-        return loss
-
-    def get_dis_loss(self, preds_S, preds_T, idx):
-        kl_distance = nn.KLDivLoss(reduction='none')
-        N, C, H, W = preds_T.shape
-
-        device = preds_S.device
-        mat = torch.rand((N, 1, H, W)).to(device)
-        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device)
-
-        masked_fea = torch.mul(preds_S, mat)
-        new_fea = self.generation[idx](masked_fea)
-
-        loss = kl_distance(self.log_sm(new_fea), self.sm(preds_T))
-        variance = kl_distance(self.log_sm(new_fea), self.sm(preds_S))
-
-        exp_variance = torch.exp(-variance)
-        dis_loss1 = torch.mean(self.a * loss + (1-self.a) * loss * exp_variance) + torch.mean(variance)
-        dis_loss = dis_loss1/N
-
-        return dis_loss
-
-#-------------------------------------------
-    # BENIN 中的 损失
-class UncerLoss(nn.Module):
-    def __init__(self,
-                 channels_s,
-                 channels_t,
-                 alpha_mgd=0.00002,
-                 a=1):
-        super(UncerLoss, self).__init__()
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.alpha_mgd = alpha_mgd
-        self.a = a
-        self.log_sm = torch.nn.LogSoftmax(dim=1)
-        self.sm = torch.nn.Softmax(dim=1)
-        self.maxpool = nn.MaxPool2d(8)
-
-        self.align = nn.Conv2d(channels_s, channels_t, kernel_size=1, stride=1, padding=0)
-
-        self.generation = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(channel, channel, kernel_size=3,
-                          padding=1)).to(device) for channel in channels_t
-        ])
-
-    def forward(self, y_s, y_t,inputs = None):
-        assert len(y_s) == len(y_t)
-        losses = []
-        for idx, (s, t) in enumerate(zip(y_s, y_t)):
-            assert s.shape == t.shape
-            bias = torch.mean(self.get_bias_loss(y_s, y_t))
-            var = torch.mean(self.get_var_loss(inputs, y_s))
-            # loss = bias / (2 * var) + var
-            exp_variance = torch.exp(-var)
-            losses.append(bias * exp_variance + var)
-        loss = sum(losses)
-        return loss
-
-    def get_bias_loss(self, preds_S, preds_T, idx):
-        kl_distance = nn.KLDivLoss(reduction='none')
-        preds_S = self.align(preds_S)
-        new_fea = self.generation[idx](preds_S)
-        bias_loss = kl_distance(self.log_sm(new_fea), self.sm(preds_T))
-        return bias_loss
-    
-    def get_var_loss(self, preds_S, inputs, idx):
-        kl_distance = nn.KLDivLoss(reduction='none')
-        inputs = inputs[0]
-        
-        new_fea = self.generation[idx](preds_S)
-        new_fea = self.align(new_fea)
-        inputs = self.maxpool(inputs)
-
-        var_loss = kl_distance(self.log_sm(inputs), self.sm(new_fea))
-
-        return var_loss
-
 
 # ------------------------------------------------------------
 class CWDLoss(nn.Module):
@@ -875,351 +1090,3 @@ class SPKDLoss(nn.Module):
             losses.append(sp_loss)
         loss = sum(losses)
         return loss
-    
-# ----------------------------------------------------------
-
-# Dist+: Knowledge distillation from a stronger adaptive teacher
-def cosine_similarity(a, b, eps=1e-8):
-    return (a * b).sum(1) / (a.norm(dim=1) * b.norm(dim=1) + eps)
-
-def pearson_correlation(a, b, eps=1e-8):
-    return cosine_similarity(a - a.mean(1).unsqueeze(1),
-                             b - b.mean(1).unsqueeze(1), eps)
-
-def inter_class_relation(y_s, y_t):
-    return 1 - pearson_correlation(y_s, y_t).mean()
-
-def intra_class_relation(y_s, y_t):
-    return inter_class_relation(y_s.transpose(0, 1), y_t.transpose(0, 1))
-
-class DIST(nn.Module):
-    def __init__(self, beta=1.0, gamma=1.0, tau=1.0):
-        super(DIST, self).__init__()
-        self.beta = beta
-        self.gamma = gamma
-        self.tau = tau
-
-    def forward(self, z_s, z_t):
-        y_s = (z_s / self.tau).softmax(dim=1)
-        y_t = (z_t / self.tau).softmax(dim=1)
-
-        inter_loss = self.tau**2 * inter_class_relation(y_s, y_t)
-        intra_loss = self.tau**2 * intra_class_relation(y_s, y_t)
-
-        kd_loss = self.beta * inter_loss + self.gamma * intra_loss
-        return kd_loss
-
-#Fusion KD
-def norm(feat: torch.Tensor) -> torch.Tensor:
-    """Normalize the feature maps to have zero mean and unit variances.
-
-    Args:
-        feat (torch.Tensor): The original feature map with shape
-            (N, C, H, W).
-    """
-    assert len(feat.shape) == 4
-    N, C, H, W = feat.shape
-    feat = feat.permute(1, 0, 2, 3).reshape(C, -1)
-    mean = feat.mean(dim=-1, keepdim=True)
-    std = feat.std(dim=-1, keepdim=True)
-    feat = (feat - mean) / (std + 1e-6)
-    return feat.reshape(C, N, H, W).permute(1, 0, 2, 3)
-
-
-@weighted_loss
-def pkd_loss(pred, target):
-    pred = norm(pred)
-    target = norm(target)
-    # return F.cosine_similarity(pred, target)/2
-    return F.mse_loss(pred, target, reduction='none') / 2
-
-
-class PKDLoss(nn.Module):
-
-    def __init__(self, reduction='mean', loss_weight=1.0):
-        super(PKDLoss, self).__init__()
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-
-    def forward(self,
-                pred,
-                target,
-                weight=None,
-                avg_factor=None,
-                reduction_override=None) -> torch.Tensor:
-        assert reduction_override in (None, 'none', 'mean', 'sum')
-        reduction = (
-            reduction_override if reduction_override else self.reduction)
-        loss = self.loss_weight * pkd_loss(
-            pred, target, weight, reduction=reduction, avg_factor=avg_factor)
-        return loss
-    
-# ----------------------------
-# RelationalKD
-def euclidean_distance(pred, squared=False, eps=1e-12):
-    """Calculate the Euclidean distance between the two examples in the output
-    representation space.
-
-    Args:
-        pred (torch.Tensor): The prediction of the teacher or student with
-            shape (N, C).
-        squared (bool): Whether to calculate the squared Euclidean
-            distance. Defaults to False.
-        eps (float): The minimum Euclidean distance between the two
-            examples. Defaults to 1e-12.
-    """
-    pred_square = pred.pow(2).sum(dim=-1)  # (N, )
-    prod = torch.mm(pred, pred.t())  # (N, N)
-    distance = (pred_square.unsqueeze(1) + pred_square.unsqueeze(0) -
-                2 * prod).clamp(min=eps)  # (N, N)
-
-    if not squared:
-        distance = distance.sqrt()
-
-    distance = distance.clone()
-    distance[range(len(prod)), range(len(prod))] = 0
-    return distance
-
-
-def angle(pred):
-    """Calculate the angle-wise relational potential which measures the angle
-    formed by the three examples in the output representation space.
-
-    Args:
-        pred (torch.Tensor): The prediction of the teacher or student with
-            shape (N, C).
-    """
-    pred_vec = pred.unsqueeze(0) - pred.unsqueeze(1)  # (N, N, C)
-    norm_pred_vec = F.normalize(pred_vec, p=2, dim=2)
-    angle = torch.bmm(norm_pred_vec,
-                      norm_pred_vec.transpose(1, 2)).view(-1)  # (N*N*N, )
-    return angle
-
-class DistanceWiseRKD(nn.Module):
-    """PyTorch version of distance-wise loss of `Relational Knowledge
-    Distillation.
-
-    <https://arxiv.org/abs/1904.05068>`_.
-
-    Args:
-        loss_weight (float): Weight of distance-wise distillation loss.
-            Defaults to 25.0.
-        with_l2_norm (bool): Whether to normalize the model predictions before
-            calculating the loss. Defaults to True.
-    """
-
-    def __init__(self, loss_weight=25.0, with_l2_norm=True):
-        super(DistanceWiseRKD, self).__init__()
-
-        self.loss_weight = loss_weight
-        self.with_l2_norm = with_l2_norm
-
-    def distance_loss(self, preds_S, preds_T):
-        """Calculate distance-wise distillation loss."""
-        d_T = euclidean_distance(preds_T, squared=False)
-        # mean_d_T is a normalization factor for distance
-        mean_d_T = d_T[d_T > 0].mean()
-        d_T = d_T / mean_d_T
-
-        d_S = euclidean_distance(preds_S, squared=False)
-        mean_d_S = d_S[d_S > 0].mean()
-        d_S = d_S / mean_d_S
-
-        return F.smooth_l1_loss(d_S, d_T)
-
-    def forward(self, preds_S, preds_T):
-        """Forward computation.
-
-        Args:
-            preds_S (torch.Tensor): The student model prediction with
-                shape (N, C, H, W) or shape (N, C).
-            preds_T (torch.Tensor): The teacher model prediction with
-                shape (N, C, H, W) or shape (N, C).
-        Return:
-            torch.Tensor: The calculated loss value.
-        """
-        preds_S = preds_S.view(preds_S.shape[0], -1)
-        preds_T = preds_T.view(preds_T.shape[0], -1)
-        if self.with_l2_norm:
-            preds_S = F.normalize(preds_S, p=2, dim=1)
-            preds_T = F.normalize(preds_T, p=2, dim=1)
-
-        loss = self.distance_loss(preds_S, preds_T) * self.loss_weight
-
-        return loss
-
-
-class AngleWiseRKD(nn.Module):
-    """PyTorch version of angle-wise loss of `Relational Knowledge
-    Distillation.
-
-    <https://arxiv.org/abs/1904.05068>`_.
-
-    Args:
-        loss_weight (float): Weight of angle-wise distillation loss.
-            Defaults to 50.0.
-        with_l2_norm (bool): Whether to normalize the model predictions before
-            calculating the loss. Defaults to True.
-    """
-
-    def __init__(self, loss_weight=50.0, with_l2_norm=True):
-        super(AngleWiseRKD, self).__init__()
-
-        self.loss_weight = loss_weight
-        self.with_l2_norm = with_l2_norm
-
-    def angle_loss(self, preds_S, preds_T):
-        """Calculate the angle-wise distillation loss."""
-        angle_T = angle(preds_T)
-        angle_S = angle(preds_S)
-        return F.smooth_l1_loss(angle_S, angle_T)
-
-    def forward(self, preds_S, preds_T):
-        """Forward computation.
-
-        Args:
-            preds_S (torch.Tensor): The student model prediction with
-                shape (N, C, H, W) or shape (N, C).
-            preds_T (torch.Tensor): The teacher model prediction with
-                shape (N, C, H, W) or shape (N, C).
-        Return:
-            torch.Tensor: The calculated loss value.
-        """
-        preds_S = preds_S.view(preds_S.shape[0], -1)
-        preds_T = preds_T.view(preds_T.shape[0], -1)
-        if self.with_l2_norm:
-            preds_S = F.normalize(preds_S, p=2, dim=-1)
-            preds_T = F.normalize(preds_T, p=2, dim=-1)
-
-        loss = self.angle_loss(preds_S, preds_T) * self.loss_weight
-
-        return loss
-
-# -------------------------------------------------
-# from mmseg.models.utils import resize
-    # Weighted-Soft-Label-Distillation
-class WSLD(nn.Module):
-    """PyTorch version of `Rethinking Soft Labels for Knowledge Distillation: A Bias-Variance Tradeoff Perspective
-    <https://arxiv.org/abs/2102.00650>`_.
-
-    Args:
-        tau (float): Temperature coefficient. Defaults to 1.0.
-        loss_weight (float): Weight of loss. Defaults to 1.0.
-        num_classes (int): Defaults to 1000.
-    """
-
-    def __init__(self, tau=1.0, loss_weight=1.0, num_classes=1000):
-        super(WSLD, self).__init__()
-
-        self.tau = tau
-        self.loss_weight = loss_weight
-        self.num_classes = num_classes
-        self.softmax = nn.Softmax(dim=1)
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, student, teacher, gt_labels):
-
-        # student = resize(
-        #         input=student,
-        #         size=gt_labels.shape[1:],
-        #         mode='bilinear',
-        #         align_corners=False)
-
-        # teacher = resize(
-        #     input=teacher,
-        #     size=gt_labels.shape[1:],
-        #     mode='bilinear',
-        #     align_corners=False)
-
-        student_logits = student / self.tau
-        teacher_logits = teacher / self.tau
-
-        teacher_probs = self.softmax(teacher_logits)
-
-        ce_loss = -torch.sum(
-            teacher_probs * self.logsoftmax(student_logits), 1, keepdim=True)
-
-        student_detach = student.detach()
-        teacher_detach = teacher.detach()
-        log_softmax_s = self.logsoftmax(student_detach)
-        log_softmax_t = self.logsoftmax(teacher_detach)
-        one_hot_labels = F.one_hot(
-            gt_labels, num_classes=self.num_classes).float().permute(0, 3, 1, 2)
-        ce_loss_s = -torch.sum(one_hot_labels * log_softmax_s, 1, keepdim=True)
-        ce_loss_t = -torch.sum(one_hot_labels * log_softmax_t, 1, keepdim=True)
-
-        focal_weight = ce_loss_s / (ce_loss_t + 1e-7)
-        ratio_lower = torch.zeros_like(focal_weight)
-        focal_weight = torch.max(focal_weight, ratio_lower)
-        focal_weight = 1 - torch.exp(-focal_weight)
-        ce_loss = focal_weight * ce_loss
-
-        loss = (self.tau**2) * torch.mean(ce_loss)
-
-        loss = self.loss_weight * loss
-
-        return loss
-
-
-# ---------------------------------------------
-class DCSFKDLoss(nn.Module):
-    def __init__(self, loss_weight=1.0, resize_stu=True):
-        '''
-        DCSF-KD: Dynamic channel-wise spatial feature knowledge distillation for object detection
-        AAAI 2026
-        '''
-        super(DCSFKDLoss, self).__init__()
-        self.loss_weight = loss_weight
-        self.resize_stu = resize_stu
-
-    def norm(self, feat: torch.Tensor) -> torch.Tensor:
-        """Normalize the feature maps to have zero mean and unit variances."""
-        assert len(feat.shape) == 4
-        N, C, H, W = feat.shape
-        feat = feat.permute(1, 0, 2, 3).reshape(C, -1)
-        mean = feat.mean(dim=-1, keepdim=True)
-        std = feat.std(dim=-1, keepdim=True)
-        feat = (feat - mean) / (std + 1e-6)
-        return feat.reshape(C, N, H, W).permute(1, 0, 2, 3)
-
-    def forward(self, preds_S, preds_T) :
-        """Forward computation."""
-        if isinstance(preds_S, torch.Tensor):
-            preds_S, preds_T = (preds_S, ), (preds_T, )
-
-        loss = 0.0
-        index = 0
-
-        for pred_S, pred_T in zip(preds_S, preds_T):
-            index += 1
-            size_S, size_T = pred_S.shape[2:], pred_T.shape[2:]
-            if size_S != size_T:
-                if self.resize_stu:
-                    pred_S = F.interpolate(pred_S, size_T, mode='bilinear', align_corners=False)
-                else:
-                    pred_T = F.interpolate(pred_T, size_S, mode='bilinear', align_corners=False)
-            assert pred_S.shape == pred_T.shape
-
-            # Apply normalization
-            norm_S, norm_T = self.norm(pred_S), self.norm(pred_T)
-
-            # Compute global average pooling to get channel-wise attentions
-            gap_T = F.adaptive_avg_pool2d(norm_T, (1, 1)).view(norm_T.size(0), -1)
-
-            # Apply softmax to the teacher attentions and scale to the range 1-10
-            softmax_att_T = F.softmax(gap_T, dim=-1) * 9 + 1  # Scale and shift
-
-           
-            # Apply teacher attentions to student feature maps
-            att_T = softmax_att_T.view(norm_S.size(0), norm_S.size(1), 1, 1).expand_as(norm_S)
-
-            weighted_S = norm_S * att_T
-
-            # Flatten the feature maps for MSE computation
-            weighted_S = weighted_S.view(weighted_S.size(0), weighted_S.size(1), -1)
-            norm_T = norm_T.view(norm_T.size(0), norm_T.size(1), -1)
-
-            # Compute MSE loss with teacher attentions applied to student feature maps
-            loss += F.mse_loss(weighted_S, norm_T)
-
-        return loss * self.loss_weight
