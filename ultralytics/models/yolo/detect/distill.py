@@ -603,8 +603,11 @@ class AdaptiveReviewKD(nn.Module):
                 # 2. Historical prototype review
                 # ------------------------------------------------------
                 if self.use_review and valid[c]:
-                    old_pt = memory[c].detach()
-
+                    # detach() 只是不让它参与梯度计算，不代表它和原 Tensor 分离存储。
+                    # 需要历史教师原型，不参与梯度计算 + 复制一份独立数据，这样后面执行 memory[c].mul_()/ 时不会影响当前 pt。
+                    # 必须 clone，避免后面 memory[c] 的 in-place update 破坏 autograd 保存的 target
+                    old_pt = memory[c].detach().clone() 
+                    
                     if self.review_use_consistency:
                         review_consistency = 0.5 * (
                             1.0
@@ -630,6 +633,8 @@ class AdaptiveReviewKD(nn.Module):
                 # ------------------------------------------------------
                 if self.use_review:
                     with torch.no_grad():
+                        pt_update = pt.detach()
+
                         if self.review_update_with_aks:
                             allow_update = bool((a_lc.detach() > self.review_theta_h).item())
                         else:
@@ -638,11 +643,11 @@ class AdaptiveReviewKD(nn.Module):
                         if allow_update:
                             if valid[c]:
                                 memory[c].mul_(self.review_momentum).add_(
-                                    pt.detach(),
+                                    pt_update,
                                     alpha=1.0 - self.review_momentum,
                                 )
                             else:
-                                memory[c].copy_(pt.detach())
+                                memory[c].copy_(pt_update)
                                 valid[c] = True
 
                             memory_update_count += 1
@@ -1411,9 +1416,7 @@ class DetectionDistiller(BaseTrainer):
                     # L_feature = A_l,c 加权后的原 feature KD + A_l,c 加权的类别原型 KD
                     # L_review = λ_re * A_l,c * r_l,c * ||P_S,l,c - M_l,c||^2
                     self.loss = main_loss + (
-                        log_distill_loss
-                        + fea_distill_loss
-                        + review_loss     # * review_loss_ratio
+                        log_distill_loss  + fea_distill_loss + review_loss
                     ) * batch["img"].size(0) * distill_decay
 
 
@@ -1454,12 +1457,9 @@ class DetectionDistiller(BaseTrainer):
                     pbar.set_description(
                         ('%11s' * 2 + '%11.4g' * (4 + loss_len + 2)) %
                         (f'{epoch + 1}/{self.epochs}',
-                          mem, 
-                          *losses,
-                          *logical_dislosses, 
-                          *feature_dislosses,
-                        *proto_dislosses,
-                        *review_dislosses,
+                          mem, *losses,
+                          *logical_dislosses, *feature_dislosses,
+                          *proto_dislosses, *review_dislosses,
                             batch['cls'].shape[0], 
                             batch['img'].shape[-1]))
                     self.run_callbacks('on_batch_end')
