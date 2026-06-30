@@ -157,9 +157,9 @@ use_adaptive_kd: True          # 是否启用本文方法模块
 # ------------------------------
 # Module-level ablation
 # ------------------------------
-use_aks: True                  # 创新点1：适配性知识选择
-use_review: False               # 创新点2：历史原型复习
-use_proto_feature_kd: True     # 是否使用类别原型级 feature KD
+use_aks: False                  # 创新点1：适配性知识选择
+use_review: True               # 创新点2：历史原型复习
+use_proto_feature_kd: False     # 是否使用类别原型级 feature KD
 
 # ------------------------------
 # AKS internal ablation
@@ -183,9 +183,9 @@ aks_renorm_weights: True      # 组件消融时是否重新归一化剩余权重
 # ------------------------------
 # Review internal ablation
 # ------------------------------
-review_use_adapt_gate: True    # L_review 是否乘 A_l,c
+review_use_adapt_gate: False    # L_review 是否乘 A_l,c
 review_use_consistency: True   # L_review 是否乘 r_l,c
-review_update_with_aks: True   # 原型池更新是否受 A_l,c > theta_h 控制
+review_update_with_aks: False   # 原型池更新是否受 A_l,c > theta_h 控制
 
 review_theta_h: 0.5
 review_momentum: 0.999
