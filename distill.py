@@ -20,8 +20,8 @@ if __name__ == '__main__':
         'device': '0',
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
-        # 'project':'runs/distill',
-        'project':'runs/debug',
+        'project':'runs/distill',
+        # 'project':'runs/debug',
         'name':'yolo11m-mimic-review-exp',
         
         # distill
@@ -37,7 +37,7 @@ if __name__ == '__main__':
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
         'feature_loss_type': 'mimic', # 'mimic', 'mgd'-loss=nan, 'cwd', 'chsim', 'sp'
-        'feature_loss_ratio': 1
+        'feature_loss_ratio': 0.5
     }
     
     model = DetectionDistiller(overrides=param_dict)
