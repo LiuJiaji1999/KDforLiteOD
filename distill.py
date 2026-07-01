@@ -20,8 +20,8 @@ if __name__ == '__main__':
         'device': '0',
         'close_mosaic': 0,
         'amp': False, # 蒸馏损失为nan，把amp设置为False
-        # 'project':'runs/distill',
-        'project':'runs/debug',
+        'project':'runs/distill',
+        # 'project':'runs/debug',
         'name':'yolo11n-cwd-aks-rev-exp',
         
         # distill
