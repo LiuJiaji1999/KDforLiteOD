@@ -614,6 +614,10 @@ class FeatureLoss(nn.Module):
         self.review_start_epoch = int(getattr(hyp, 'review_start_epoch', 0))
         self.review_schedule = str(getattr(hyp, 'review_schedule', 'sine')).lower()
 
+        self.adapt_global_loss_ratio = float(getattr(hyp, 'adapt_global_loss_ratio', 0.1))
+        self.adapt_region_loss_ratio = float(getattr(hyp, 'adapt_region_loss_ratio', 1.0))
+
+
         # Historical teacher prototypes M_{l,c}; one memory matrix per layer because C differs by layer.
         for li, c in enumerate(channels_t):
             self.register_buffer(f'review_memory_{li}', torch.zeros(self.nc, c))

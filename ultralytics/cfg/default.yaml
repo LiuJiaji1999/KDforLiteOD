@@ -128,8 +128,8 @@ tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yam
 
 # Distill settings
 prune_model: False
-teacher_weights:
-teacher_cfg:
+teacher_weights: ''runs/train/11exp2/weights/best.pt'
+teacher_cfg: 'ultralytics/cfg/models/11/yolo11m.yaml'
 kd_loss_type: feature # 'logical', 'feature', 'all'
 kd_loss_decay: constant # 'cosine', 'linear', 'cosine_epoch', 'linear_epoch', 'constant'
 
@@ -141,7 +141,7 @@ logical_loss_ratio: 1.0
 teacher_kd_layers: 15,18,21
 student_kd_layers: 15,18,21
 feature_loss_type: adaptive_review # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
-feature_loss_ratio: 1.0
+feature_loss_ratio: 0.15
 
 # Adaptive Review Feature Distillation settings
 # Module-level ablation:
@@ -149,7 +149,7 @@ feature_loss_ratio: 1.0
 #   adaptive only: feature_loss_type=adaptive_review, review_enable=False
 #   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
 #   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
-adapt_base_loss_type: cwd # base feature distiller wrapped by adaptive_review: 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
+adapt_base_loss_type: pkd # base feature distiller wrapped by adaptive_review: 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
 adapt_enable: True
 review_enable: True
 
@@ -168,15 +168,19 @@ adapt_entropy_tau: 1.0
 
 # Stable adaptive weighting
 adapt_norm_weight: True # use bounded affine mapping from A to KD weight for stability
-adapt_min_weight: 0.5
-adapt_max_weight: 1.5
-adapt_region_loss_ratio: 0.10 # small foreground class-region auxiliary loss, keeps base KD dominant
+adapt_min_weight: 0.25
+adapt_max_weight: 1.0
+adapt_region_loss_ratio: 1.0 # small foreground class-region auxiliary loss, keeps base KD dominant
 
 # Historical teacher prototype review
-review_ratio: 0.5
+review_ratio: 0.2
 review_momentum: 0.999
-review_quality_thr: 0.5
+review_quality_thr: 0.65
 review_use_consistency: True
 review_update_memory: True
-review_start_epoch: 0
+review_start_epoch: 10
 review_schedule: sine # 'sine', 'constant', 'linear'
+
+
+
+
