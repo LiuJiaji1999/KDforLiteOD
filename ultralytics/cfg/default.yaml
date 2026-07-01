@@ -138,8 +138,8 @@ logical_loss_type: l2 # 'l1', 'l2', 'BCKD'
 logical_loss_ratio: 0.5
 
 # feature distillation settings
-teacher_kd_layers: 16,19,22
-student_kd_layers: 16,19,22
+teacher_kd_layers: 22 # 16,19,22 
+student_kd_layers: 22 # 16,19,22
 feature_loss_type: pkd # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
 feature_loss_ratio: 0.15
 
