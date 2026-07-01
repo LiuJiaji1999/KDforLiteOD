@@ -483,7 +483,7 @@ class DetectionDistiller(BaseTrainer):
             # 4) In _setup_train(), replace FeatureLoss construction with:
                 hyp=self.args,
                 nc=self.data['nc']
-                )
+                ).to(self.device)
             for hook in hooks:
                 hook.remove()
         

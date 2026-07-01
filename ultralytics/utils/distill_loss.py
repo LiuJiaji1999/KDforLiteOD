@@ -570,14 +570,15 @@ class FeatureLoss(nn.Module):
         self.last_review_lambda = None
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
         self.align_module = nn.ModuleList([
-            nn.Conv2d(channel, tea_channel, kernel_size=1, stride=1, padding=0).to(device)
+            nn.Conv2d(channel, tea_channel, kernel_size=1, stride=1, padding=0)
             if channel != tea_channel else nn.Identity()
             for channel, tea_channel in zip(channels_s, channels_t)
         ])
         # Register normalization layers correctly; affine=False keeps no extra trainable params.
         self.norm = nn.ModuleList([
-            nn.BatchNorm2d(tea_channel, affine=False).to(device) for tea_channel in channels_t
+            nn.BatchNorm2d(tea_channel, affine=False) for tea_channel in channels_t
         ])
 
         self.distiller_name = str(distiller).lower()
@@ -617,6 +618,32 @@ class FeatureLoss(nn.Module):
         for li, c in enumerate(channels_t):
             self.register_buffer(f'review_memory_{li}', torch.zeros(self.nc, c))
             self.register_buffer(f'review_valid_{li}', torch.zeros(self.nc, dtype=torch.bool))
+    
+    def _get_review_memory(self, li, device):
+        """
+        Return historical review memory on the same device as current features.
+
+        review_memory_{li} stores historical teacher prototypes M_{l,c}.
+        review_valid_{li} marks whether class c already has a valid prototype.
+
+        This function is a safety guard for cases where buffers are still on CPU
+        after module initialization or checkpoint loading.
+        """
+        mem_name = f'review_memory_{li}'
+        valid_name = f'review_valid_{li}'
+
+        mem = getattr(self, mem_name)
+        valid = getattr(self, valid_name)
+
+        if mem.device != device:
+            mem = mem.to(device)
+            self._buffers[mem_name] = mem
+
+        if valid.device != device:
+            valid = valid.to(device)
+            self._buffers[valid_name] = valid
+
+        return mem, valid
 
     def _align_and_norm(self, y_s, y_t):
         tea_feats, stu_feats = [], []
@@ -843,24 +870,42 @@ class FeatureLoss(nn.Module):
 
                 # Region-level auxiliary feature KD makes A_{l,c} directly act on class foreground prototypes.
                 region_feature_losses.append(A * F.mse_loss(sp, tp.detach()))
-
-                mem = getattr(self, f'review_memory_{li}')
-                valid = getattr(self, f'review_valid_{li}')
+                # ------------------------------------------------------------
+                # Review loss: use the historical teacher prototype M^-_{l,c}
+                # before updating the memory with the current teacher prototype.
+                # ------------------------------------------------------------
+                mem,valid = self._get_review_memory(li, device=device)
                 if self.review_enable and bool(valid[c].item()):
-                    m_proto = mem[c].detach().clone()
-                    
-                    rr = (F.cosine_similarity(t_proto[None], m_proto[None], dim=1).squeeze(0) + 1.0) * 0.5
+                     # detach(): historical memory is a fixed target, not optimized by gradients.
+                    # clone(): avoid autograd error because mem[c] will be updated in-place later.
+                    # to(): make sure memory target is on the same device as current prototypes.
+                    m_proto = mem[c].detach().clone().to(device)
+                    # Historical consistency r_{l,c}.
+                    # A high value means the current teacher prototype is consistent with
+                    # the historical teacher prototype, so review is more reliable.
+                    rr = (F.cosine_similarity(
+                        t_proto.detach()[None], 
+                        m_proto[None], 
+                        dim=1).squeeze(0) + 1.0
+                        ) * 0.5
                     if not self.use_review_consistency:
                         rr = torch.ones_like(rr)
+                        # A and r are weighting factors, so both are detached.
+                    # Only s_proto receives gradients from the review constraint.
                     layer_review.append(A.detach() * rr.detach() * F.mse_loss(s_proto, m_proto))
-
+                # ------------------------------------------------------------
+                # Memory update: update M^-_{l,c} to M^+_{l,c} after review loss.
+                # Only high-quality teacher prototypes are written into memory.
+                # ------------------------------------------------------------
                 if self.review_enable and self.update_memory:
                     with torch.no_grad():
                         if bool((KT > self.review_quality_thr).item()):
-                            t_proto_detached = t_proto.detach()
+                            t_proto_detached = t_proto.detach().to(device)
 
                             if bool(valid[c].item()):
-                                mem[c].mul_(self.review_momentum).add_(t_proto_detached, alpha=1.0 - self.review_momentum)
+                                mem[c].mul_(self.review_momentum).add_(
+                                    t_proto_detached, 
+                                    alpha=1.0 - self.review_momentum)
                             else:
                                 mem[c].copy_(t_proto_detached)
                                 valid[c] = True
