@@ -37,8 +37,8 @@ if __name__ == '__main__':
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
          # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
-        'feature_loss_type': 'adaptive_review', 
-        'feature_loss_ratio': 0.5
+        'feature_loss_type': 'pkd', 
+        'feature_loss_ratio': 0.15
     }
     
     model = DetectionDistiller(overrides=param_dict)
