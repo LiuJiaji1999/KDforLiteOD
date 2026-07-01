@@ -22,7 +22,7 @@ if __name__ == '__main__':
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
         # 'project':'runs/debug',
-        'name':'yolo11m-mimic-aks_review-exp',
+        'name':'yolo11n-cwd-aks-rev-exp',
         
         # distill
         'prune_model': False,
@@ -36,7 +36,8 @@ if __name__ == '__main__':
         
         'teacher_kd_layers': '16,19,22',
         'student_kd_layers': '16,19,22',
-        'feature_loss_type': 'mimic', # 'mimic', 'mgd', 'cwd', 'chsim', 'sp'
+         # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
+        'feature_loss_type': 'adaptive_review', 
         'feature_loss_ratio': 0.5
     }
     
