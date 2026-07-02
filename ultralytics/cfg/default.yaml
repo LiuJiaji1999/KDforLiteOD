@@ -138,10 +138,10 @@ logical_loss_type: l2 # 'l1', 'l2', 'BCKD'
 logical_loss_ratio: 0.5
 
 # feature distillation settings
-teacher_kd_layers: '22' # 16,19,22 
-student_kd_layers: '22' # 16,19,22
-feature_loss_type: pkd # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
-feature_loss_ratio: 0.15
+teacher_kd_layers: '16,19,22' # 16,19,22 
+student_kd_layers: '16,19,22' # 16,19,22
+feature_loss_type: mimic # 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd', 'adaptive_review'
+feature_loss_ratio: 0.5
 
 # Adaptive Review Feature Distillation settings
 # Module-level ablation:
@@ -149,7 +149,7 @@ feature_loss_ratio: 0.15
 #   adaptive only: feature_loss_type=adaptive_review, review_enable=False
 #   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
 #   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
-adapt_base_loss_type: pkd # base feature distiller wrapped by adaptive_review: 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
+adapt_base_loss_type: mimic # base feature distiller wrapped by adaptive_review: 'mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
 adapt_enable: True
 review_enable: True
 
