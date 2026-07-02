@@ -12,7 +12,7 @@ if __name__ == '__main__':
         'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
         'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
-        'epochs': 200,
+        'epochs': 250, #200
         'batch': 8,
         'workers': 4,
         'cache': True,
