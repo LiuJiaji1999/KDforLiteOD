@@ -9,7 +9,7 @@ from ultralytics.models.yolo.detect.distill import DetectionDistiller
 if __name__ == '__main__':
     param_dict = {
         # origin
-        'model': 'ultralytics/cfg/models/11/yolo11s.yaml', # stu
+        'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
         'data':'./dataset/powerdata.yaml',
         'imgsz': 640,
         'epochs': 200, #250
@@ -22,7 +22,7 @@ if __name__ == '__main__':
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
         # 'project':'runs/debug',
-        'name':'yolo11s-mimic-exp', #-aks-rev-exp
+        'name':'yolo11s-mimic-aks-rev-exp', #-aks-rev-exp
         
         # distill
         'prune_model': False,
