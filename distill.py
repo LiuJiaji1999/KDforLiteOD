@@ -10,7 +10,7 @@ if __name__ == '__main__':
     param_dict = {
         # origin
         'model': 'ultralytics/cfg/models/11/yolo11n.yaml', # stu
-        'data':'./dataset/powerdata.yaml',
+        'data':'./dataset/VisDrone.yaml', #powerdata
         'imgsz': 640,
         'epochs': 200, #250
         'batch': 8,
@@ -22,11 +22,11 @@ if __name__ == '__main__':
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
         # 'project':'runs/debug',
-        'name':'yolo11n-cwd-aks-rev-exp', #-aks-rev-exp
+        'name':'yolo11n-mimic-vis', #-aks-rev-exp
         
         # distill
         'prune_model': False,
-        'teacher_weights': 'runs/train/11exp2/weights/best.pt', #private
+        # 'teacher_weights': 'runs/train/11exp2/weights/best.pt', #private
         'teacher_weights': 'ultralytics-yolo11-main/runs/train/exp6/weights/best.pt', #visdrone
         'teacher_cfg': 'ultralytics/cfg/models/11/yolo11m.yaml',
         # 'kd_loss_type': 'feature', # 'logical', 'feature', 'all'
