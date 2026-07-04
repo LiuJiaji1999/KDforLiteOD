@@ -26,7 +26,8 @@ if __name__ == '__main__':
         
         # distill
         'prune_model': False,
-        'teacher_weights': 'runs/train/11exp2/weights/best.pt',
+        'teacher_weights': 'runs/train/11exp2/weights/best.pt', #private
+        'teacher_weights': 'ultralytics-yolo11-main/runs/train/exp6/weights/best.pt', #visdrone
         'teacher_cfg': 'ultralytics/cfg/models/11/yolo11m.yaml',
         # 'kd_loss_type': 'feature', # 'logical', 'feature', 'all'
         # 'kd_loss_decay': 'constant', # 'cosine', 'linear', 'cosine_epoch', 'linear_epoch', 'constant'
