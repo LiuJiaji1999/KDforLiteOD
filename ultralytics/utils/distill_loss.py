@@ -604,6 +604,8 @@ class FeatureLoss(nn.Module):
         self.update_memory = bool(getattr(hyp, 'review_update_memory', True))
 
         self.tau_gap = float(getattr(hyp, 'adapt_tau_gap', 1.0))
+        self.mu_gap = 1.0
+        self.sigma_gap = 0.5
         self.entropy_tau = float(getattr(hyp, 'adapt_entropy_tau', 1.0))
         self.adapt_min_weight = float(getattr(hyp, 'adapt_min_weight', 0.25))
         self.adapt_max_weight = float(getattr(hyp, 'adapt_max_weight', 2.0))
@@ -768,14 +770,13 @@ class FeatureLoss(nn.Module):
     def _student_demand(self, Sim, G):
         if not self.use_student_demand:
             return torch.ones_like(Sim)
-        terms = []
+        if self.use_Sim and self.use_G:
+            return 0.5 * ((1.0 - Sim) + G)
         if self.use_Sim:
-            terms.append(1.0 - Sim)
+            return 1.0 - Sim
         if self.use_G:
-            terms.append(1.0 - G)
-        if not terms:
-            return torch.ones_like(Sim)
-        return sum(terms) / len(terms)
+            return G
+        return torch.ones_like(Sim)
 
     def _adaptive_review_forward(self, stu_feats, tea_feats, batch, t_pred, epoch, total_epochs):
         device = stu_feats[0].device
@@ -860,7 +861,10 @@ class FeatureLoss(nn.Module):
                 sdp = s_std.permute(0, 2, 3, 1)[mask]
                 tdp = t_std.permute(0, 2, 3, 1)[mask]
                 D = (sdp - tdp).abs().mean()
-                G = torch.exp(-D / max(self.tau_gap, self.eps))
+                mu_g = getattr(self, 'mu_gap', 1.0)
+                sigma_g = max(getattr(self, 'sigma_gap', 0.5), self.eps)
+                G = torch.exp(-((D - mu_g) ** 2) / (2.0 * sigma_g ** 2))
+                # G = torch.exp(-D / max(self.tau_gap, self.eps))
 
                 n = stat[c]['n'].clamp(min=1.0)
                 R = (stat[c]['R_sum'] / n).clamp(0.0, 1.0)
