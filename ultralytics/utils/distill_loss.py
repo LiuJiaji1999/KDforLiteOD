@@ -773,7 +773,8 @@ class FeatureLoss(nn.Module):
         if not self.use_student_demand:
             return torch.ones_like(Sim)
         if self.use_Sim and self.use_G:
-            return 0.5 * ((1.0 - Sim) + G)
+            # return 0.5 * ((1.0 - Sim) + G)
+            return (1.0 - Sim) * G
         if self.use_Sim:
             return 1.0 - Sim
         if self.use_G:
