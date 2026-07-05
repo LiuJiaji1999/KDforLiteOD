@@ -537,6 +537,8 @@ def _build_feature_distiller(distiller, channels_s, channels_t):
         return SPKDLoss(channels_s, channels_t)
     if distiller == 'pkd':
         return PKDLoss(channels_s, channels_t)
+    if distiller == 'sl2':
+        return SL2Loss(channels_s, channels_t)
     raise NotImplementedError(f'Unknown feature distiller: {distiller}')
 
 
@@ -1154,3 +1156,136 @@ class SPKDLoss(nn.Module):
             losses.append(sp_loss)
         loss = sum(losses)
         return loss
+
+# ------------------------------------------------------------
+class SL2Loss(nn.Module):
+    """
+    Score-weighted L2 distillation loss.
+
+    This implementation follows the original YOLO SL2 idea:
+    teacher confidence scores are used as spatial weights for feature L2 loss.
+
+    It is rewritten to be consistent with other distillation losses such as
+    MGDLoss, CWDLoss, ChSimLoss and SPKDLoss:
+        loss = SL2Loss(channels_s, channels_t)
+        loss(y_s, y_t)
+
+    Args:
+        channels_s (list): Student feature channels. Kept for interface consistency.
+        channels_t (list): Teacher feature channels. Kept for interface consistency.
+        eps (float): Small value for numerical stability.
+        use_teacher_score (bool): Whether to use teacher score maps if provided.
+    """
+
+    def __init__(self,
+                 channels_s,
+                 channels_t,
+                 eps=1e-9,
+                 use_teacher_score=True):
+        super(SL2Loss, self).__init__()
+        self.eps = eps
+        self.use_teacher_score = use_teacher_score
+
+    def forward(self, y_s, y_t, teacher_scores=None):
+        """
+        Forward computation.
+
+        Args:
+            y_s (list[Tensor]): Student features, each with shape (N, C, H, W).
+            y_t (list[Tensor]): Teacher features, each with shape (N, C, H, W).
+            teacher_scores (tuple/list[Tensor], optional):
+                Teacher score maps for each feature level.
+                Each score map should have shape (N, 1, H*W) or (N, 1, H, W).
+
+        Returns:
+            Tensor: Distillation loss over all feature levels.
+        """
+        assert len(y_s) == len(y_t)
+        losses = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape
+
+            if self.use_teacher_score and teacher_scores is not None:
+                score = teacher_scores[idx]
+            else:
+                score = self._build_score_from_teacher_feature(t)
+
+            losses.append(self.get_dis_loss(s, t, score))
+
+        return sum(losses)
+
+    def get_dis_loss(self, preds_S, preds_T, teacher_score):
+        """
+        Compute score-weighted L2 loss for one feature level.
+
+        Args:
+            preds_S (Tensor): Student feature, shape (N, C, H, W).
+            preds_T (Tensor): Teacher feature, shape (N, C, H, W).
+            teacher_score (Tensor): Spatial weight, shape (N, 1, H*W) or (N, 1, H, W).
+
+        Returns:
+            Tensor: Score-weighted L2 loss.
+        """
+        n, c, h, w = preds_S.shape
+
+        student_feat = preds_S.view(n, c, -1)
+        teacher_feat = preds_T.detach().view(n, c, -1)
+
+        teacher_score = self._format_teacher_score(
+            teacher_score=teacher_score,
+            n=n,
+            h=h,
+            w=w,
+            device=preds_S.device,
+            dtype=preds_S.dtype
+        )
+
+        mse = F.mse_loss(student_feat, teacher_feat, reduction="none")
+        weighted_mse = (mse * teacher_score).sum() / (teacher_score.sum() * c + self.eps)
+
+        return weighted_mse
+
+    def _format_teacher_score(self, teacher_score, n, h, w, device, dtype):
+        """
+        Format teacher score to shape (N, 1, H*W).
+        """
+        teacher_score = teacher_score.to(device=device, dtype=dtype)
+
+        if teacher_score.dim() == 4:
+            teacher_score = teacher_score.view(n, 1, -1)
+        elif teacher_score.dim() == 3:
+            pass
+        else:
+            raise ValueError(
+                f"teacher_score should have shape (N, 1, H, W) or (N, 1, H*W), "
+                f"but got {teacher_score.shape}"
+            )
+
+        if teacher_score.shape[-1] != h * w:
+            teacher_score = teacher_score.view(n, 1, int(teacher_score.shape[-1] ** 0.5), -1)
+            teacher_score = F.interpolate(
+                teacher_score,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False
+            ).view(n, 1, -1)
+
+        return teacher_score.clamp(min=0.0)
+
+    def _build_score_from_teacher_feature(self, teacher_feat):
+        """
+        Build a fallback spatial score map from teacher feature energy.
+
+        This is used when external teacher confidence scores are not provided.
+        It keeps the loss callable as loss(y_s, y_t), like MGD/CWD/SPKD/ChSim.
+        """
+        with torch.no_grad():
+            n, c, h, w = teacher_feat.shape
+
+            score = teacher_feat.detach().pow(2).mean(dim=1, keepdim=True)
+            score = score.view(n, 1, -1)
+
+            score = score / (score.mean(dim=-1, keepdim=True) + self.eps)
+
+        return score
