@@ -12,7 +12,7 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-sp-vis/weights/best.pt'
+    model_path = '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/weights/best.pt'
     model = YOLO(model_path) # 选择训练好的权重路径
     result = model.val(
                         # data='./dataset/powerdata.yaml',
