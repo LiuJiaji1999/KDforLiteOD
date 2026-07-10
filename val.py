@@ -18,7 +18,7 @@ if __name__ == '__main__':
                         # data='./dataset/powerdata.yaml',
                         data='./dataset/VisDrone.yaml',
                         split='test', # split可以选择train、val、test 根据自己的数据集情况来选择.
-                        imgsz=800,
+                        imgsz=864, #800 864
                         batch=1,
                         # iou=0.7,
                         # rect=False,
