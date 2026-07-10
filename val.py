@@ -24,7 +24,7 @@ if __name__ == '__main__':
                         # rect=False,
                         # save_json=True, # if you need to cal coco metrice
                         project='runs/val',
-                        name='vis-cwd-full',
+                        name='vis-cwd-aks-rev',
                         )
     
     if model.task == 'detect':  
