@@ -149,7 +149,7 @@ feature_loss_ratio: 0.5
 #   adaptive only: feature_loss_type=adaptive_review, review_enable=False
 #   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
 #   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
-adapt_base_loss_type: pkd # base feature distiller wrapped by adaptive_review: 'sl2','mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
+adapt_base_loss_type: sl2 # base feature distiller wrapped by adaptive_review: 'sl2','mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
 adapt_enable: True
 review_enable: True
 
