@@ -12,7 +12,7 @@ This is our PyTorch implementation of the paper "[`Adaptability-aware and knowle
 
 ## 🚩Dataset
 ```bash
-/dataset/VisDrone.yaml:VisDrone2019-DET 
+/dataset/VisDrone.yaml: VisDrone2019-DET 
     # https://github.com/VisDrone/VisDrone-Dataset
 /dataset/powerdata.yaml: Private Power Data 
     # Due to the signing of a confidentiality agreement, this dataset is not publicly available at this time.
@@ -90,7 +90,7 @@ Table: Comparison of different feature distillation methods on Private Power Dat
 3. heatmap.py ：heatmap
 4. get_FPS.py ：compute model param、inference-time、FPS
 5. get_model_erf.py ： erf
-6. test_other.py ： debug
+6. get_all_yaml_param_and_flops.py ： param and flops
 7. plot_result.py：visualize loss and metrics
 ```
 
