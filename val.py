@@ -12,7 +12,7 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-mimic-aks-rev-vis/weights/best.pt'
+    model_path = '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-vis/weights/last.pt'
     model = YOLO(model_path) # 选择训练好的权重路径
     result = model.val(
                         # data='./dataset/powerdata.yaml',
@@ -24,7 +24,7 @@ if __name__ == '__main__':
                         # rect=False,
                         # save_json=True, # if you need to cal coco metrice
                         project='runs/val',
-                        name='vis-mimic-aks-rev',
+                        name='vis-cwd-aks',
                         )
     
     if model.task == 'detect':  
