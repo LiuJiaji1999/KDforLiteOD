@@ -150,7 +150,7 @@ feature_loss_ratio: 0.5
 #   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
 #   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
 adapt_base_loss_type: cwd # base feature distiller wrapped by adaptive_review: 'sl2','mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
-adapt_enable: False
+adapt_enable: True
 review_enable: True
 
 # Teacher quality K_T ablation
@@ -160,7 +160,7 @@ adapt_use_Q: True # teacher localization quality; falls back to confidence proxy
 adapt_use_U: True # teacher uncertainty
 
 # Student learning demand K_S ablation
-adapt_use_student_demand: True
+adapt_use_student_demand: False
 adapt_use_Sim: True # teacher-student feature similarity
 adapt_use_G: True # normalized feature gap adaptation
 adapt_tau_gap: 1.0
