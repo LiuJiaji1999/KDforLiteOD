@@ -48,8 +48,6 @@ attention:
 
 ```shell
 ## Teacher
-python train.py 
-# save outputlog
 nohup python train.py > /log/XXX.log 2>&1 & tail -f /log/XXX.log
 ## Student
 nohup python distill.py > /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/11mimic-aks-rev_vis.log 2>&1 & tail -f /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/11mimic-aks-rev_vis.log
