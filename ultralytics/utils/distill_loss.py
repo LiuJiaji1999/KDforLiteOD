@@ -747,7 +747,7 @@ class FeatureLoss(nn.Module):
         elif epoch < self.review_start_epoch:
             val = 0.0
         elif self.review_schedule == 'constant':
-            val = 1.0 #0.5
+            val = 0.5 #0.5
         elif self.review_schedule == 'linear':
             val = min(max((epoch - self.review_start_epoch) / max(total_epochs - self.review_start_epoch - 1, 1), 0.0), 1.0)
         else:
