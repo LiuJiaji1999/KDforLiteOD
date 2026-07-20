@@ -154,7 +154,7 @@ adapt_enable: True
 review_enable: True
 
 # Teacher quality K_T ablation
-adapt_use_teacher_quality: False
+adapt_use_teacher_quality: True
 adapt_use_R: True # teacher class reliability
 adapt_use_Q: True # teacher localization quality; falls back to confidence proxy if boxes cannot be decoded
 adapt_use_U: True # teacher uncertainty
