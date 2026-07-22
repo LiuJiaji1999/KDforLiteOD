@@ -179,7 +179,7 @@ review_quality_thr: 0.65
 review_use_consistency: True
 review_update_memory: True
 review_start_epoch: 10
-review_schedule: constant # 'sine', 'constant', 'linear'
+review_schedule: linear # 'sine', 'constant', 'linear'
 
 
 
