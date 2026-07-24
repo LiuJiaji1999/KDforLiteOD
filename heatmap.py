@@ -344,7 +344,7 @@ class yolo_heatmap:
 def get_params():
     params = {
         ### Visdrone
-        'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-mainruns/train/exp6/best.pt', # tea
+        'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-main/runs/train/exp6/best.pt', # tea
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11n-stu-vis/best.pt', # stu
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/best.pt', # cwd
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-vis/best.pt', # cwd+ours
