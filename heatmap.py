@@ -371,4 +371,5 @@ def get_params():
 if __name__ == '__main__':
     model = yolo_heatmap(**get_params())
     # model(r'/home/ljj/Desktop/dataset/dataset_coco/coco/images/val2017/000000361238.jpg', 'result')
-    model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/test', 'tea_result')
+    model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/test', 'tea_result-vis') # stu_result-vis, cwd_result-vis, ours_result-vis
+    # model(r'//home/lenovo/data/liujiaji/yolov8/powerdata/images/test', 'tea_result-pr') # stu_result-pr, cwd_result-pr, ours_result-pr
