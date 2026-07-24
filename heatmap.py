@@ -343,7 +343,17 @@ class yolo_heatmap:
         
 def get_params():
     params = {
-        'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-mainruns/train/exp6/best.pt', # 现在只需要指定权重即可,不需要指定cfg
+        ### Visdrone
+        'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-mainruns/train/exp6/best.pt', # tea
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11n-stu-vis/best.pt', # stu
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/best.pt', # cwd
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-vis/best.pt', # cwd+ours
+        # ### private power data
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11exp2/best.pt', # tea
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11nexp-stu/best.pt', # stu
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-pr/best.pt', # cwd
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-pr/best.pt', # cwd+ours
+        
         'device': 'cuda:0',
         'method': 'GradCAMPlusPlus', # GradCAMPlusPlus, GradCAM, XGradCAM, EigenCAM, HiResCAM, LayerCAM, RandomCAM, EigenGradCAM, KPCA_CAM
         'layer': [10, 12, 14, 16, 18],
@@ -360,5 +370,5 @@ def get_params():
 # pip install grad-cam==1.5.4 --no-deps
 if __name__ == '__main__':
     model = yolo_heatmap(**get_params())
-    model(r'/home/ljj/Desktop/dataset/dataset_coco/coco/images/val2017/000000361238.jpg', 'result')
-    # model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/test', 'result')
+    # model(r'/home/ljj/Desktop/dataset/dataset_coco/coco/images/val2017/000000361238.jpg', 'result')
+    model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/test', 'tea_result')
