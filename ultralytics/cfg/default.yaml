@@ -150,7 +150,7 @@ feature_loss_ratio: 0.5
 #   review only: feature_loss_type=adaptive_review, adapt_enable=False, review_enable=True
 #   full method: feature_loss_type=adaptive_review, adapt_enable=True, review_enable=True
 adapt_base_loss_type: cwd # base feature distiller wrapped by adaptive_review: 'sl2','mimic', 'mgd', 'cwd', 'chsim', 'sp', 'pkd'
-adapt_enable: True
+adapt_enable: False
 review_enable: True
 
 # Teacher quality K_T ablation
@@ -179,7 +179,7 @@ review_quality_thr: 0.65
 review_use_consistency: True
 review_update_memory: True
 review_start_epoch: 10
-review_schedule: linear # 'sine', 'constant', 'linear'
+review_schedule: sine # 'sine', 'constant', 'linear'
 
 
 
