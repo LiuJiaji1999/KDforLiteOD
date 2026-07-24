@@ -318,9 +318,9 @@ class yolo_heatmap:
         if self.show_result:
             cam_image = pred.plot(img=cam_image,
                                   conf=True, # 显示置信度
-                                  font_size=None, # 字体大小，None为根据当前image尺寸计算
-                                  line_width=None, # 线条宽度，None为根据当前image尺寸计算
-                                  labels=False, # 显示标签
+                                  font_size=1, # 字体大小，None为根据当前image尺寸计算
+                                  line_width=1, # 线条宽度，None为根据当前image尺寸计算
+                                  labels=True, # 显示标签
                                   )
         
         # 去掉padding边界
@@ -344,21 +344,22 @@ class yolo_heatmap:
 def get_params():
     params = {
         ### Visdrone
-        'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-main/runs/train/exp6/best.pt', # tea
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11n-stu-vis/best.pt', # stu
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/best.pt', # cwd
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-vis/best.pt', # cwd+ours
+        # 'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-main/runs/train/exp6/weights/best.pt', # tea
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11n-stu-vis/weights/best.pt', # stu
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/weights/best.pt', # cwd
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-vis/weights/best.pt', # cwd+ours
+        
         # ### private power data
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11exp2/best.pt', # tea
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11nexp-stu/best.pt', # stu
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-pr/best.pt', # cwd
-        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-pr/best.pt', # cwd+ours
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11exp2/weights/best.pt', # tea
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11nexp-stu/weights/best.pt', # stu
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-pr/weights/best.pt', # cwd
+        'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-pr/weights/best.pt', # cwd+ours
         
         'device': 'cuda:0',
         'method': 'GradCAMPlusPlus', # GradCAMPlusPlus, GradCAM, XGradCAM, EigenCAM, HiResCAM, LayerCAM, RandomCAM, EigenGradCAM, KPCA_CAM
         'layer': [10, 12, 14, 16, 18],
         'backward_type': 'all', # detect:<class, box, all> segment:<class, box, segment, all> pose:<box, keypoint, all> obb:<box, angle, all> classify:<all>
-        'conf_threshold': 0.2, # 0.2
+        'conf_threshold': 0.5, # 0.2
         'ratio': 0.02, # 0.02-0.1
         'show_result': True, # 不需要绘制结果请设置为False
         'renormalize': True, # 需要把热力图限制在框内请设置为True(仅对detect,segment,pose有效)
@@ -370,6 +371,8 @@ def get_params():
 # pip install grad-cam==1.5.4 --no-deps
 if __name__ == '__main__':
     model = yolo_heatmap(**get_params())
-    # model(r'/home/ljj/Desktop/dataset/dataset_coco/coco/images/val2017/000000361238.jpg', 'result')
-    model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/test', 'tea_result-vis') # stu_result-vis, cwd_result-vis, ours_result-vis
-    # model(r'//home/lenovo/data/liujiaji/yolov8/powerdata/images/test', 'tea_result-pr') # stu_result-pr, cwd_result-pr, ours_result-pr
+    # model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/val/0000001_02999_d_0000005.jpg', 'result')
+    # model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/val'
+    #       , 'ours_result-vis') # stu_result-vis, cwd_result-vis, ours_result-vis
+    model(r'/home/lenovo/data/liujiaji/yolov8/powerdata/images/val', 
+    'ours_result-pr') # stu_result-pr, cwd_result-pr, ours_result-pr
