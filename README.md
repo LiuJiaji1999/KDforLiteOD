@@ -5,9 +5,9 @@
 This is our PyTorch implementation of the paper "[`Adaptability-aware and knowledge-review distillation method for UAV Object Detection`]"submitted in ***IEEE Geoscience and Remote Sensing Letters***.
 
 
-<!-- <div align="center">
-    <img src="fig1.png" width="1000" alt="MFCO">
-</div> -->
+<div align="center">
+    <img src="fig1.png" width="1000" alt="KD">
+</div>
 
 
 ## 🚩Dataset
@@ -32,7 +32,7 @@ git clone https://github.com/LiuJiaji1999/KDforLiteOD.git
 # the version of ultralytics is '8.3.9'           
 # GPU - 24G NVIDIA GeForce RTX 3090 
 # CPU - 12th Gen Intel(R) Core(TM) i9-12900
-pip install -r OD-requirements.txt
+pip install -r requirements.txt
 attention:
   - opencv-python==4.9.0.80
   - opencv-python-headless==4.9.0.80
@@ -59,27 +59,18 @@ nohup python distill.py > /home/lenovo/data/liujiaji/powerGit/prune-distill/logs
 <summary>Test</summary>
 
 ```bash
-Since github cannot push big file, we put '.pt' into the Google Drive,so you can directly test :
+Since github cannot push big file, we put '.pt' into the Google Drive,so you can directly test:
 # https://drive.google.com/drive/folders/1SSlZEZvlthQqWaZFEPYCWwkEe-40fqsX
-nohup python val.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log 2>&1 & tail -f /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log # test dataset 
 
-python detect.py # Visualization of detect results
+nohup python val.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log 2>&1 & tail -f /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log # test dataset 
+# Visualization of detect results
+python detect.py 
+nohup python heatmap.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/heatmap.log 2>&1 & tail -f /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/heatmap.log
 ```
 </details>
 
 
-#### 📝Detail result
-```bash
-Because the content exceeds the page limit, we are displaying the category results here:
-```
-
-Table: Comparison of different feature distillation methods on VisDrone 2019-DET
-
-
-Table: Comparison of different feature distillation methods on Private Power Data
-
-
-
+scp -r lenovo@121.195.169.36:/home/lenovo/data/liujiaji/KDforOD/runs/train/11nexp-stu /Users/rl/Downloads/PrivatePowerData
 
 #### 🌟Explanation of the file
 ```bash
