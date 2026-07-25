@@ -60,7 +60,7 @@ nohup python distill.py > /home/lenovo/data/liujiaji/powerGit/prune-distill/logs
 
 ```bash
 Since github cannot push big file, we put '.pt' into the Google Drive,so you can directly test:
-# https://drive.google.com/drive/folders/1SSlZEZvlthQqWaZFEPYCWwkEe-40fqsX
+# https://drive.google.com/drive/folders/1sKWl0MZWC2yQYt1bvABQdky6oaREciaL
 
 nohup python val.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log 2>&1 & tail -f /home/lenovo/data/liujiaji/powerGit/prune-distill/logs/val/11vis-ours.log # test dataset 
 # Visualization of detect results
@@ -69,8 +69,6 @@ nohup python heatmap.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/log
 ```
 </details>
 
-
-scp -r lenovo@121.195.169.36:/home/lenovo/data/liujiaji/KDforOD/runs/train/11nexp-stu /Users/rl/Downloads/PrivatePowerData
 
 #### 🌟Explanation of the file
 ```bash
