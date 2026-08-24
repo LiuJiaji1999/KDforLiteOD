@@ -2,7 +2,7 @@
 
 ## 💡Introduction
 
-This is our PyTorch implementation of the paper "[`Adaptability-aware and knowledge-review distillation method for UAV Object Detection`]"submitted in ***IEEE Geoscience and Remote Sensing Letters***.
+This is our PyTorch implementation of the paper "[`Adaptability-aware and knowledge-review distillation method for UAV Object Detection`]"submitted in ***Pattern Recognition Letters***.
 
 
 <div align="center">
