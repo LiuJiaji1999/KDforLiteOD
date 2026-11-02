@@ -750,6 +750,17 @@ class FeatureLoss(nn.Module):
             val = 0.5 #0.5
         elif self.review_schedule == 'linear':
             val = min(max((epoch - self.review_start_epoch) / max(total_epochs - self.review_start_epoch - 1, 1), 0.0), 1.0)
+        elif self.review_schedule == 'curriculum':
+            progress = min(max(
+                (epoch - self.review_start_epoch) /
+                max(total_epochs - self.review_start_epoch - 1, 1),0.0
+            ), 1.0)
+            if progress < 0.2:
+                val = 0.0
+            elif progress < 0.8:
+                val = (progress - 0.2) / 0.6
+            else:
+                val = 1.0
         else:
             progress = min(max(epoch / max(total_epochs - 1, 1), 0.0), 1.0)
             val = math.sin(math.pi * progress)
@@ -866,8 +877,11 @@ class FeatureLoss(nn.Module):
                 D = (sdp - tdp).abs().mean()
                 mu_g = getattr(self, 'mu_gap', 1.0)
                 sigma_g = max(getattr(self, 'sigma_gap', 0.5), self.eps)
-                G = torch.exp(-((D - mu_g) ** 2) / (2.0 * sigma_g ** 2))
+                G = torch.exp(-((D - mu_g) ** 2) / (2.0 * sigma_g ** 2))# bell
                 # G = torch.exp(-D / max(self.tau_gap, self.eps))
+                G = torch.sigmoid((D - mu_g) / sigma_g) # sin
+                G = torch.clamp((D - mu_g) / (2.0 * sigma_g) + 0.5, min=0.0, max=1.0) # linear
+                G = (D >= mu_g).to(dtype=D.dtype) # step
 
                 n = stat[c]['n'].clamp(min=1.0)
                 R = (stat[c]['R_sum'] / n).clamp(0.0, 1.0)

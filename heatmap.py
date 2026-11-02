@@ -312,7 +312,7 @@ class yolo_heatmap:
         grayscale_cam = grayscale_cam[0, :]
         cam_image = show_cam_on_image(img, grayscale_cam, use_rgb=True)
         
-        pred = self.model_yolo.predict(tensor, conf=self.conf_threshold, iou=0.7)[0]
+        pred = self.model_yolo.predict(tensor, conf=self.conf_threshold, iou=0.8)[0]
         if self.renormalize and self.task in ['detect', 'segment', 'pose']:
             cam_image = self.renormalize_cam_in_bounding_boxes(pred.boxes.xyxy.cpu().detach().numpy().astype(np.int32), img, grayscale_cam)
         if self.show_result:
@@ -347,6 +347,8 @@ def get_params():
         # 'weight': '/home/lenovo/data/liujiaji/ultralytics-yolo11-main/runs/train/exp6/weights/best.pt', # tea
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/train/11n-stu-vis/weights/best.pt', # stu
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-vis/weights/best.pt', # cwd
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-vis/weights/best.pt', # cwd+aks
+        # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-rev-vis/weights/best.pt', # cwd+kr
         # 'weight': '/home/lenovo/data/liujiaji/KDforOD/runs/distill/yolo11n-cwd-aks-rev-vis/weights/best.pt', # cwd+ours
         
         # ### private power data
@@ -357,9 +359,9 @@ def get_params():
         
         'device': 'cuda:0',
         'method': 'GradCAMPlusPlus', # GradCAMPlusPlus, GradCAM, XGradCAM, EigenCAM, HiResCAM, LayerCAM, RandomCAM, EigenGradCAM, KPCA_CAM
-        'layer': [10, 12, 14, 16, 18],
+        'layer': [10, 12, 14, 16, 18], #[10, 12, 14, 16, 18],
         'backward_type': 'all', # detect:<class, box, all> segment:<class, box, segment, all> pose:<box, keypoint, all> obb:<box, angle, all> classify:<all>
-        'conf_threshold': 0.5, # 0.2
+        'conf_threshold': 0.55, # 0.2
         'ratio': 0.02, # 0.02-0.1
         'show_result': True, # 不需要绘制结果请设置为False
         'renormalize': True, # 需要把热力图限制在框内请设置为True(仅对detect,segment,pose有效)
@@ -374,5 +376,7 @@ if __name__ == '__main__':
     # model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/val/0000001_02999_d_0000005.jpg', 'result')
     # model(r'/home/lenovo/data/liujiaji/Datasets-Video/VisDrone2019-DET/images/val'
     #       , 'ours_result-vis') # stu_result-vis, cwd_result-vis, ours_result-vis
-    model(r'/home/lenovo/data/liujiaji/yolov8/powerdata/images/val', 
-    'ours_result-pr') # stu_result-pr, cwd_result-pr, ours_result-pr
+    # model(r'/home/lenovo/data/liujiaji/yolov8/powerdata/images/val', 
+    # 'ours_result-pr') # stu_result-pr, cwd_result-pr, ours_result-pr
+    model(r'/home/lenovo/data/liujiaji/powerGit/distill/paperimage/image'
+          , 'ours_result-vis') # stu_result-vis, cwd_result-vis, ours_result-vis
