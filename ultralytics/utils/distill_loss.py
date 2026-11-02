@@ -879,9 +879,9 @@ class FeatureLoss(nn.Module):
                 sigma_g = max(getattr(self, 'sigma_gap', 0.5), self.eps)
                 G = torch.exp(-((D - mu_g) ** 2) / (2.0 * sigma_g ** 2))# bell
                 # G = torch.exp(-D / max(self.tau_gap, self.eps))
-                G = torch.sigmoid((D - mu_g) / sigma_g) # sin
-                G = torch.clamp((D - mu_g) / (2.0 * sigma_g) + 0.5, min=0.0, max=1.0) # linear
-                G = (D >= mu_g).to(dtype=D.dtype) # step
+                # G = torch.sigmoid((D - mu_g) / sigma_g) # sin
+                # G = torch.clamp((D - mu_g) / (2.0 * sigma_g) + 0.5, min=0.0, max=1.0) # linear
+                # G = (D >= mu_g).to(dtype=D.dtype) # step
 
                 n = stat[c]['n'].clamp(min=1.0)
                 R = (stat[c]['R_sum'] / n).clamp(0.0, 1.0)
