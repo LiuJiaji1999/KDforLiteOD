@@ -79,6 +79,7 @@ nohup python heatmap.py >> /home/lenovo/data/liujiaji/powerGit/prune-distill/log
 5. get_model_erf.py ： erf
 6. get_all_yaml_param_and_flops.py ： param and flops
 7. plot_result.py：visualize loss and metrics
+8. plot_adaptability.py:visualize A_mean score
 ```
 
 
