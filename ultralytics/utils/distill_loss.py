@@ -539,6 +539,8 @@ def _build_feature_distiller(distiller, channels_s, channels_t):
         return PKDLoss(channels_s, channels_t)
     if distiller == 'sl2':
         return SL2Loss(channels_s, channels_t)
+    if distiller == 'scd':
+        return SCDLoss(channels_s, channels_t)
     raise NotImplementedError(f'Unknown feature distiller: {distiller}')
 
 
@@ -1304,3 +1306,107 @@ class SL2Loss(nn.Module):
             score = score / (score.mean(dim=-1, keepdim=True) + self.eps)
 
         return score
+
+# ------------------------------------------------------------
+class SCDLoss(nn.Module):
+    def __init__(self, channels_s, channels_t,
+                 c_t=1.0, c_s_ratio=1.0,
+                 loss_weight=7e-4):
+        super(SCDLoss, self).__init__()
+
+        self.channels_s = channels_s
+        self.channels_t = channels_t
+
+        self.c_t = c_t
+        self.c_s_ratio = c_s_ratio
+        self.loss_weight = loss_weight
+
+        if c_t <= 0:
+            raise ValueError("c_t must be greater than 0")
+        if c_s_ratio < 0:
+            raise ValueError("c_s_ratio must be non-negative")
+
+    def forward(self, y_s, y_t):
+        """Forward computation.
+
+        Args:
+            y_s (list): Student feature maps, each with
+                shape (N, C, H, W).
+            y_t (list): Teacher feature maps, each with
+                shape (N, C, H, W).
+
+        Returns:
+            torch.Tensor: SCD distillation loss.
+        """
+        assert len(y_s) == len(y_t)
+        assert len(y_s) > 0
+
+        total_loss = None
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape, (
+                f"Stage {idx}: student {s.shape} "
+                f"!= teacher {t.shape}"
+            )
+
+            N, C, H, W = s.shape
+
+            # --------------------------------------------
+            # 1. Teacher channel attention
+            # --------------------------------------------
+            c_t_attention = torch.mean(
+                torch.abs(t), dim=(2, 3)
+            )  # (N, C)
+
+            c_t_attention = F.softmax(
+                c_t_attention / self.c_t, dim=1
+            ) * C
+
+            c_t_attention = c_t_attention.view(N, C, 1, 1)
+
+            # --------------------------------------------
+            # 2. Student channel attention
+            # --------------------------------------------
+            c_s_attention = torch.mean(
+                torch.abs(s), dim=(2, 3)
+            )  # (N, C)
+
+            c_s_attention = F.softmax(
+                c_s_attention / self.c_t, dim=1
+            ) * C
+
+            c_s_attention = c_s_attention.view(N, C, 1, 1)
+
+            # --------------------------------------------
+            # 3. Fuse teacher and student attention
+            # --------------------------------------------
+            c_sum_attention = (
+                c_t_attention +
+                self.c_s_ratio * c_s_attention
+            ) / (1.0 + self.c_s_ratio)
+
+            c_sum_attention = c_sum_attention.detach()
+
+            # --------------------------------------------
+            # 4. Weighted squared feature difference
+            # --------------------------------------------
+            diff = (s - t).pow(2)
+
+            weighted_diff = diff * c_sum_attention
+
+            # Sum over C, H, W for each sample
+            stage_loss = weighted_diff.sum(dim=(1, 2, 3))
+
+            if total_loss is None:
+                total_loss = stage_loss
+            else:
+                total_loss = total_loss + stage_loss
+
+        # --------------------------------------------
+        # 5. Square root across all feature stages
+        # --------------------------------------------
+        eps = 1e-12
+        loss = (torch.sqrt(total_loss + eps) -
+                eps ** 0.5).mean()
+
+        return loss * self.loss_weight
