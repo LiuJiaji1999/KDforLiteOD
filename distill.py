@@ -13,7 +13,7 @@ if __name__ == '__main__':
         # 'data':'./dataset/powerdata.yaml',  #powerdata
         'data':'./dataset/VisDrone.yaml',
         'imgsz': 640,
-        'epochs': 200, #250
+        'epochs': 200, #200
         'batch': 8,
         'workers': 4,
         'cache': True,
