@@ -23,7 +23,7 @@ if __name__ == '__main__':
         'amp': False, # 蒸馏损失为nan，把amp设置为False
         'project':'runs/distill',
         # 'project':'runs/debug',
-        'name':'yolo11n-scd-pr', #-aks-rev-exp
+        'name':'yolo11n-scd-aks-rev-pr', #-aks-rev-exp
         
         # distill
         'prune_model': False,
